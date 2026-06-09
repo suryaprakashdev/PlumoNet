@@ -579,6 +579,45 @@
             color: #fff;
         }
 
+        .upload-divider {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 20px 0 16px;
+            color: var(--dim);
+            font-size: 11px;
+        }
+        .upload-divider::before,
+        .upload-divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: var(--border2);
+        }
+        .btn-sample {
+            background: transparent;
+            border: 1px solid rgba(14, 165, 233, 0.35);
+            color: var(--blue);
+            padding: 8px 18px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: all .2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+            justify-content: center;
+        }
+        .btn-sample:hover {
+            background: var(--blue-glow);
+            border-color: var(--blue);
+        }
+        .btn-sample:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
         .prog-status {
             margin-top: 20px;
             font-family: var(--mono);
@@ -676,6 +715,36 @@
         ::-webkit-scrollbar-thumb:hover {
             background: var(--dim);
         }
+        /* ─── STAGE DOTS ─────────────────────────── */
+        .stage-dot {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 5px;
+        }
+        .stage-pip {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--border2);
+            transition: background .3s, box-shadow .3s;
+        }
+        .stage-dot.active .stage-pip {
+            background: var(--blue);
+            box-shadow: 0 0 6px rgba(14,165,233,0.6);
+        }
+        .stage-dot.done .stage-pip {
+            background: var(--green);
+        }
+        .stage-lbl {
+            font-size: 9px;
+            font-family: var(--mono);
+            color: var(--dim);
+            text-transform: uppercase;
+            letter-spacing: .04em;
+        }
+        .stage-dot.active .stage-lbl { color: var(--blue); }
+        .stage-dot.done  .stage-lbl  { color: var(--green); }
     </style>
 </head>
 
@@ -757,10 +826,59 @@
                         📁 Open Folder
                     </button>
                 </div>
-                <div class="prog-status" id="prog-status"></div>
-                <div class="prog-track" id="prog-track" style="display:none">
-                    <div class="prog-fill" id="prog-fill"></div>
+                <div class="upload-divider">or try a sample</div>
+                <button class="btn-sample" id="sample-btn" onclick="event.stopPropagation();runSample()">
+                    🔬 Run Sample DICOM Study
+                    <span style="font-size:10px;color:var(--muted);font-family:var(--mono)">(LIDC-IDRI)</span>
+                </button>
+                <!-- Processing visualizer -->
+                <div id="proc-visualizer" style="display:none;margin-top:24px;width:100%">
+                    <!-- Circular percent ring -->
+                    <div style="display:flex;align-items:center;gap:18px">
+                        <div style="position:relative;width:72px;height:72px;flex-shrink:0">
+                            <svg width="72" height="72" style="transform:rotate(-90deg)">
+                                <circle cx="36" cy="36" r="30" fill="none" stroke="#1f1f24" stroke-width="5"/>
+                                <circle id="ring-circle" cx="36" cy="36" r="30" fill="none"
+                                    stroke="#0ea5e9" stroke-width="5"
+                                    stroke-dasharray="188.5" stroke-dashoffset="188.5"
+                                    stroke-linecap="round"
+                                    style="transition:stroke-dashoffset 0.5s ease"/>
+                            </svg>
+                            <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
+                                <span id="ring-pct" style="font-family:var(--mono);font-size:15px;font-weight:700;color:var(--text);line-height:1">0%</span>
+                            </div>
+                        </div>
+                        <div style="flex:1;min-width:0">
+                            <div id="prog-status" style="font-family:var(--mono);font-size:11px;color:var(--blue);margin-bottom:8px;line-height:1.4"></div>
+                            <!-- Thin bar -->
+                            <div style="height:3px;background:var(--border2);border-radius:2px;overflow:hidden">
+                                <div id="prog-fill" style="height:100%;background:var(--blue);border-radius:2px;width:0%;transition:width 0.5s ease"></div>
+                            </div>
+                            <!-- Elapsed / estimated -->
+                            <div style="display:flex;justify-content:space-between;margin-top:6px;font-family:var(--mono);font-size:10px;color:var(--dim)">
+                                <span>Elapsed: <span id="elapsed-time" style="color:var(--muted)">0s</span></span>
+                                <span>Est. remaining: <span id="remain-time" style="color:var(--muted)">—</span></span>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Stage dots -->
+                    <div style="display:flex;justify-content:space-between;margin-top:14px;padding:0 4px">
+                        <div class="stage-dot" id="stage-0" data-label="Upload">
+                            <div class="stage-pip"></div><div class="stage-lbl">Upload</div>
+                        </div>
+                        <div class="stage-dot" id="stage-1" data-label="Segment">
+                            <div class="stage-pip"></div><div class="stage-lbl">Segment</div>
+                        </div>
+                        <div class="stage-dot" id="stage-2" data-label="Classify">
+                            <div class="stage-pip"></div><div class="stage-lbl">Classify</div>
+                        </div>
+                        <div class="stage-dot" id="stage-3" data-label="Render">
+                            <div class="stage-pip"></div><div class="stage-lbl">Render</div>
+                        </div>
+                    </div>
                 </div>
+                <!-- Keep hidden prog-track for legacy setProgress bar usage -->
+                <div id="prog-track" style="display:none"><div></div></div>
             </div>
         </div>
 
@@ -830,7 +948,7 @@
     <input type="file" id="folder-input" webkitdirectory style="display:none" onchange="handleFolder(this.files)">
 
     <script>
-        const ENDPOINT = 'http://localhost:3000/predict';
+        const ENDPOINT = `${window.location.origin}/predict`;
         let currentData = null;
         let selectedIdx = 0;
 
@@ -876,19 +994,97 @@
             ws.style.height = `calc(100vh - ${header + banner + progBar}px)`;
         }
 
-        // ─── PROGRESS ─────────────────────────────────────────────────
+        // ─── PROGRESS VISUALIZER ──────────────────────────────────────
+        let _timerInterval = null;
+        let _inferenceStart = null;
+        // Expected total duration in seconds (used for ring animation during inference)
+        const EXPECTED_INFERENCE_S = 150;
+
+        // Stage index mapping by pct thresholds
+        // 0=Upload(0-45), 1=Segment(45-80), 2=Classify(80-93), 3=Render(93-100)
+        const STAGE_THRESHOLDS = [0, 45, 80, 93, 100];
+
+        function _updateStages(pct) {
+            for (let i = 0; i < 4; i++) {
+                const el = document.getElementById('stage-' + i);
+                if (!el) continue;
+                if (pct >= STAGE_THRESHOLDS[i + 1]) {
+                    el.className = 'stage-dot done';
+                } else if (pct >= STAGE_THRESHOLDS[i]) {
+                    el.className = 'stage-dot active';
+                } else {
+                    el.className = 'stage-dot';
+                }
+            }
+        }
+
+        function _setRing(pct) {
+            const circ = 2 * Math.PI * 30; // r=30 → 188.5
+            const offset = circ * (1 - pct / 100);
+            const ring = document.getElementById('ring-circle');
+            if (ring) ring.style.strokeDashoffset = offset;
+            const lbl = document.getElementById('ring-pct');
+            if (lbl) lbl.textContent = Math.round(pct) + '%';
+            // Color ring red when near complete
+            if (ring) ring.style.stroke = pct >= 95 ? '#10b981' : '#0ea5e9';
+        }
+
+        function _startElapsedTimer() {
+            _inferenceStart = Date.now();
+            if (_timerInterval) clearInterval(_timerInterval);
+            _timerInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - _inferenceStart) / 1000);
+                const el = document.getElementById('elapsed-time');
+                if (el) el.textContent = elapsed + 's';
+                // During inference stage, animate ring from current base pct smoothly over time
+                const barPct = parseFloat(document.getElementById('prog-fill').style.width || '0');
+                if (barPct >= 65 && barPct < 95) {
+                    // Animate ring from 65→93 over EXPECTED_INFERENCE_S
+                    const inferElapsed = Math.floor((Date.now() - _inferenceStart) / 1000);
+                    const timePct = Math.min(inferElapsed / EXPECTED_INFERENCE_S, 1);
+                    const animated = 65 + timePct * (93 - 65);
+                    _setRing(Math.min(animated, 93));
+                    // Remaining estimate
+                    const rem = document.getElementById('remain-time');
+                    if (rem) {
+                        const secsLeft = Math.max(0, EXPECTED_INFERENCE_S - inferElapsed);
+                        rem.textContent = secsLeft > 0 ? secsLeft + 's' : 'almost done…';
+                    }
+                }
+            }, 1000);
+        }
+
         function setProgress(pct, label) {
+            // Top bar
             document.getElementById('prog-bar').style.width = pct + '%';
+            // Show visualizer
+            const vis = document.getElementById('proc-visualizer');
+            if (vis) vis.style.display = 'block';
+            // Label
             const st = document.getElementById('prog-status');
-            const tr = document.getElementById('prog-track');
-            st.style.display = 'block';
-            tr.style.display = 'block';
-            st.textContent = label;
-            document.getElementById('prog-fill').style.width = pct + '%';
+            if (st) st.textContent = label;
+            // Bar fill
+            const fill = document.getElementById('prog-fill');
+            if (fill) fill.style.width = pct + '%';
+            // Ring (only snap if not in animated inference phase)
+            const barPct = parseFloat(fill ? fill.style.width : '0');
+            if (barPct < 65 || barPct >= 93) _setRing(pct);
+            // Stages
+            _updateStages(pct);
+            // Start elapsed timer at inference kick-off
+            if (pct >= 65 && !_timerInterval) _startElapsedTimer();
         }
 
         function hideProgress() {
             document.getElementById('prog-bar').style.width = '0%';
+            if (_timerInterval) { clearInterval(_timerInterval); _timerInterval = null; }
+            const vis = document.getElementById('proc-visualizer');
+            if (vis) vis.style.display = 'none';
+            // Reset
+            _setRing(100);
+            _updateStages(100);
+            const rem = document.getElementById('remain-time');
+            if (rem) rem.textContent = '—';
         }
 
         function showError(msg) {
@@ -896,7 +1092,31 @@
             document.getElementById('err-msg').textContent = msg;
             t.style.display = 'block';
             setTimeout(() => t.style.display = 'none', 7000);
-            setProgress(0, 'Error — see notification');
+            if (_timerInterval) { clearInterval(_timerInterval); _timerInterval = null; }
+            const st = document.getElementById('prog-status');
+            if (st) st.textContent = 'Error — see notification';
+        }
+
+        // ─── SAMPLE RUN ───────────────────────────────────────────────
+        const SAMPLE_URL = 'https://storage.googleapis.com/sample-dicomfile/dicoms.zip';
+
+        async function runSample() {
+            const btn = document.getElementById('sample-btn');
+            btn.disabled = true;
+            btn.innerHTML = '⏳ Fetching sample DICOM…';
+            try {
+                setProgress(15, 'Downloading sample DICOM from cloud storage...');
+                const resp = await fetch(SAMPLE_URL, { signal: AbortSignal.timeout(120000) });
+                if (!resp.ok) throw new Error(`Download failed: HTTP ${resp.status}`);
+                setProgress(45, 'Sample downloaded — sending to inference server...');
+                const blob = await resp.blob();
+                await sendInference(blob);
+            } catch (e) {
+                showError('Sample run failed: ' + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '🔬 Run Sample DICOM Study <span style="font-size:10px;color:var(--muted);font-family:var(--mono)">(LIDC-IDRI)</span>';
+            }
         }
 
         // ─── UPLOAD ───────────────────────────────────────────────────
@@ -1068,6 +1288,14 @@
             document.getElementById('workspace').style.height = 'calc(100vh - 54px)';
             document.getElementById('zip-input').value = '';
             document.getElementById('folder-input').value = '';
+            // Reset visualizer
+            const vis = document.getElementById('proc-visualizer');
+            if (vis) vis.style.display = 'none';
+            _setRing(0);
+            _updateStages(0);
+            if (_timerInterval) { clearInterval(_timerInterval); _timerInterval = null; }
+            const et = document.getElementById('elapsed-time'); if (et) et.textContent = '0s';
+            const rt = document.getElementById('remain-time'); if (rt) rt.textContent = '—';
         }
 
         // ─── MODAL ────────────────────────────────────────────────────
