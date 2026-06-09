@@ -20,15 +20,13 @@ Usage on Colab:
 #  Configuration — Update these paths for your setup
 # ──────────────────────────────────────────────
 
-# Google Drive paths (update for your folder structure)
-GDRIVE_ROOT    = "/content/drive/MyDrive"
-RAW_DICOM_DIR  = f"{GDRIVE_ROOT}/LIDC-IDRI"                    # raw DICOM data
-PROCESSED_DIR  = f"{GDRIVE_ROOT}/Lung_Cancer_Classification/processed_3d"  # preprocessed 3D volumes
-CHECKPOINT_DIR = f"{GDRIVE_ROOT}/Lung_Cancer_Classification/Checkpoints_3D"
-RESULTS_DIR    = f"{GDRIVE_ROOT}/Lung_Cancer_Classification/Results_3D"
+# Local paths (macOS)
+PROJECT_ROOT   = "/Users/suryaprakash/Documents/My projects/CANCER_CT/git_repo"
+CHECKPOINT_DIR = f"{PROJECT_ROOT}/content/checkpoints"
+RESULTS_DIR    = f"{PROJECT_ROOT}/results"
 
 # Example DICOM series for inference test
-TEST_SERIES    = f"{RAW_DICOM_DIR}/LIDC-IDRI-0065/1.3.6.1.4.1.14519.5.2.1.6279.6001.163217526257871051722166468085"
+TEST_SERIES    = "/Users/suryaprakash/Desktop/LIDC-IDRI-0065/1.3.6.1.4.1.14519.5.2.1.6279.6001.163217526257871051722166468085"
 
 
 # ══════════════════════════════════════════════
@@ -83,14 +81,21 @@ pipeline = InferencePipeline3D(
     resnet_checkpoint=f"{CHECKPOINT_DIR}/resnet3d_calibrated.pth",
 )
 
-# Run inference on a test volume
+# Run inference on a test volume (with Grad-CAM enabled)
 result = pipeline.run_volume(
     folder_path=TEST_SERIES,
     aggregation="top_k",
     k=5,
+    generate_gradcam=True,     # enable 3D Grad-CAM
+    gradcam_top_k=3,           # generate for top 3 most suspicious candidates
 )
 
 print(result.summary())
+
+# Save Grad-CAM overlays automatically
+saved = result.save_gradcam_overlays(RESULTS_DIR)
+if saved:
+    print(f"\n  Saved {len(saved)} Grad-CAM overlays → {RESULTS_DIR}/")
 
 
 # ══════════════════════════════════════════════
@@ -114,57 +119,86 @@ import numpy as np
 
 
 def visualize_3d_results(result, n_candidates=3):
-    """Visualize segmentation mask and top candidates from 3D inference."""
+    """
+    Visualize segmentation mask, candidates, and Grad-CAM overlays
+    from the 3D inference pipeline.
+    """
 
-    if result.segmentation_mask is None:
-        print("No segmentation mask available.")
-        return
-
-    mask = result.segmentation_mask
     candidates = result.candidates[:n_candidates]
 
     if not candidates:
         print("No candidates found.")
         return
 
-    fig, axes = plt.subplots(len(candidates), 3, figsize=(15, 5 * len(candidates)))
+    # Determine number of columns: 3 (seg views) or 4 (+ gradcam)
+    has_gradcam = any(c.gradcam_heatmap is not None for c in candidates)
+    n_cols = 4 if has_gradcam else 3
+
+    fig, axes = plt.subplots(len(candidates), n_cols,
+                             figsize=(5 * n_cols, 5 * len(candidates)))
     if len(candidates) == 1:
         axes = [axes]
+
+    mask = result.segmentation_mask
 
     for row, cand in enumerate(candidates):
         z, y, x = cand.centroid
 
-        # Col 0: Axial slice through centroid
-        if z < mask.shape[0]:
+        # ── Col 0: Axial seg mask slice ──────────────
+        if mask is not None and z < mask.shape[0]:
             axes[row][0].imshow(mask[z], cmap="hot", alpha=0.7)
+            axes[row][0].plot(x, y, 'g+', markersize=15, markeredgewidth=2)
             axes[row][0].set_title(
                 f"Seg Mask — Axial (z={z})\n"
                 f"Candidate {cand.candidate_index}", fontsize=9
             )
-            axes[row][0].plot(x, y, 'g+', markersize=15, markeredgewidth=2)
         axes[row][0].axis("off")
 
-        # Col 1: Coronal slice
-        if y < mask.shape[1]:
+        # ── Col 1: Coronal seg mask slice ────────────
+        if mask is not None and y < mask.shape[1]:
             axes[row][1].imshow(mask[:, y, :], cmap="hot", alpha=0.7)
-            axes[row][1].set_title(f"Coronal (y={y})", fontsize=9)
             axes[row][1].plot(x, z, 'g+', markersize=15, markeredgewidth=2)
+            axes[row][1].set_title(f"Coronal (y={y})", fontsize=9)
         axes[row][1].axis("off")
 
-        # Col 2: Prediction info
+        # ── Col 2: Prediction info ───────────────────
         info_text = (
             f"Candidate {cand.candidate_index}\n"
             f"─────────────\n"
             f"Centroid: ({z}, {y}, {x})\n"
             f"Volume: {cand.volume_voxels} voxels\n"
             f"Prediction: {cand.prediction}\n"
-            f"Probability: {cand.probability:.4f}"
+            f"Probability: {cand.probability:.4f}\n"
+            f"Grad-CAM: {'✓' if cand.gradcam_heatmap is not None else '—'}"
         )
         axes[row][2].text(0.1, 0.5, info_text, transform=axes[row][2].transAxes,
                           fontsize=11, verticalalignment='center',
                           fontfamily='monospace',
                           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         axes[row][2].axis("off")
+
+        # ── Col 3: Grad-CAM overlay (axial center) ──
+        if has_gradcam and cand.gradcam_heatmap is not None and cand.crop_volume is not None:
+            crop = cand.crop_volume
+            hmap = cand.gradcam_heatmap
+            mid = crop.shape[0] // 2
+
+            # Window HU for display
+            disp = np.clip(crop[mid], -1350, 150)
+            disp = (disp + 1350) / 1500
+
+            axes[row][3].imshow(disp, cmap="gray")
+            axes[row][3].imshow(hmap[mid], cmap="jet", alpha=0.4)
+            axes[row][3].set_title(
+                f"Grad-CAM (axial center)\nprob={cand.probability:.4f}",
+                fontsize=9,
+            )
+            axes[row][3].axis("off")
+        elif has_gradcam:
+            axes[row][3].text(0.5, 0.5, "No Grad-CAM",
+                              ha='center', va='center',
+                              transform=axes[row][3].transAxes)
+            axes[row][3].axis("off")
 
     plt.suptitle(
         f"Patient: {result.patient_id} | "

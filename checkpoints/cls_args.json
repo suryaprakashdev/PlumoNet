@@ -1,0 +1,12 @@
+{
+  "data_dir": "/content/drive/MyDrive/Lung_Cancer_Classification/processed_3d",
+  "save_dir": "checkpoints",
+  "epochs": 50,
+  "patience": 10,
+  "batch_size": 16,
+  "lr": 0.0001,
+  "num_workers": 1,
+  "cache_rate": 1.0,
+  "cache_dir": null,
+  "no_amp": false
+}

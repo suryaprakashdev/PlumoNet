@@ -48,6 +48,21 @@ from resnet3d import ResNet3D10
 logger = logging.getLogger(__name__)
 
 
+import onnxruntime as ort
+
+class UNetONNXWrapper:
+    """Wrapper to make ONNX session callable like a PyTorch module for SlidingWindowInferer."""
+    def __init__(self, session: ort.InferenceSession):
+        self.session = session
+        self.input_name = session.get_inputs()[0].name
+        
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        # x is (B, 1, 64, 64, 64) torch tensor
+        ort_inputs = {self.input_name: x.cpu().numpy()}
+        ort_outs = self.session.run(None, ort_inputs)
+        return torch.from_numpy(ort_outs[0]).to(x.device)
+
+
 # ──────────────────────────────────────────────
 #  Constants
 # ──────────────────────────────────────────────
@@ -67,6 +82,7 @@ class CandidateResult:
     """Result for a single nodule candidate."""
     candidate_index: int
     centroid: Tuple[int, int, int]     # (z, y, x) in volume coordinates
+    bbox: Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int]] # ((z0,z1), (y0,y1), (x0,x1))
     volume_voxels: int                 # number of voxels in the segmented region
     probability: float                 # malignancy probability [0, 1]
     prediction: str                    # "Malignant" | "Benign"
@@ -89,9 +105,13 @@ class VolumeResult3D:
     # Segmentation info
     n_candidates_found: int
     segmentation_mask: Optional[np.ndarray] = None   # full-volume mask
+    volume_iso: Optional[np.ndarray] = None          # isotropic resampled volume
 
     # Per-candidate details
     candidates: List[CandidateResult] = field(default_factory=list)
+
+    # Active slices that contain nodules
+    active_slices: Dict[str, List[int]] = field(default_factory=lambda: {"axial": [], "coronal": [], "sagittal": []})
 
     # Timing
     total_time_ms: float = 0.0
@@ -269,8 +289,8 @@ class InferencePipeline3D:
 
     def __init__(
         self,
-        unet_checkpoint: str,
-        resnet_checkpoint: str,
+        unet_onnx_path: str,
+        resnet_onnx_path: str,
         device: Optional[torch.device] = None,
         seg_threshold: float = SEG_THRESHOLD,
         min_candidate_voxels: int = 10,
@@ -281,21 +301,18 @@ class InferencePipeline3D:
         self.seg_threshold = seg_threshold
         self.min_candidate_voxels = min_candidate_voxels
 
-        # Load U-Net
-        self.unet = UNet3D().to(self.device)
-        self.unet.load_state_dict(torch.load(
-            unet_checkpoint, map_location=self.device, weights_only=True
-        ))
-        self.unet.eval()
-        logger.info("Loaded U-Net ← %s", unet_checkpoint)
+        # Setup ONNX providers
+        providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if torch.cuda.is_available() else ['CPUExecutionProvider']
 
-        # Load ResNet classifier
-        self.resnet = ResNet3D10().to(self.device)
-        self.resnet.load_state_dict(torch.load(
-            resnet_checkpoint, map_location=self.device, weights_only=True
-        ))
-        self.resnet.eval()
-        logger.info("Loaded ResNet3D ← %s", resnet_checkpoint)
+        # Load U-Net ONNX
+        unet_session = ort.InferenceSession(unet_onnx_path, providers=providers)
+        self.unet = UNetONNXWrapper(unet_session)
+        logger.info("Loaded U-Net ONNX ← %s", unet_onnx_path)
+
+        # Load ResNet ONNX
+        self.resnet_session = ort.InferenceSession(resnet_onnx_path, providers=providers)
+        self.resnet_input_name = self.resnet_session.get_inputs()[0].name
+        logger.info("Loaded ResNet3D ONNX ← %s", resnet_onnx_path)
 
         # MONAI SlidingWindowInferer for full-volume segmentation
         self.inferer = SlidingWindowInferer(
@@ -323,6 +340,7 @@ class InferencePipeline3D:
         aggregation: str = "top_k",
         k: int = 5,
         classification_threshold: float = 0.5,
+        min_malignancy_prob: float = 0.0,
     ) -> VolumeResult3D:
         """
         Run end-to-end 3D inference on a DICOM series folder.
@@ -333,10 +351,7 @@ class InferencePipeline3D:
         aggregation              : "max" | "mean" | "top_k"
         k                        : top-k for aggregation
         classification_threshold : decision boundary (default: 0.5)
-
-        Returns
-        -------
-        VolumeResult3D
+        min_malignancy_prob      : filter out nodules with prob below this
         """
         request_id = str(uuid.uuid4())
         t0 = time.perf_counter()
@@ -354,7 +369,18 @@ class InferencePipeline3D:
             meta["pixel_spacing"][0],
             meta["pixel_spacing"][1],
         )
+
+        # ── Diagnostic: volume loading ──
+        print(f"\n  [DEBUG] === VOLUME LOADING ===")
+        print(f"  [DEBUG] Raw volume shape (D,H,W): {volume.shape}")
+        print(f"  [DEBUG] Spacing (D,H,W): {spacing}")
+        print(f"  [DEBUG] HU range: [{volume.min():.1f}, {volume.max():.1f}]")
+
         volume_iso, scale_factors = resample_to_isotropic(volume, spacing)
+
+        print(f"  [DEBUG] Resampled volume shape: {volume_iso.shape}")
+        print(f"  [DEBUG] Scale factors: {scale_factors}")
+
         logger.info("Resampled %s → %s (spacing %s → 1mm iso)",
                      volume.shape, volume_iso.shape, spacing)
 
@@ -370,9 +396,19 @@ class InferencePipeline3D:
         # ── 5. Classify each candidate ────────
         t_cls = time.perf_counter()
         candidate_results = self._classify_candidates(
-            volume_iso, candidates_info, classification_threshold
+            volume_iso, candidates_info, classification_threshold, min_malignancy_prob
         )
         cls_time = (time.perf_counter() - t_cls) * 1000
+
+        # ── Collect active slices ─────────────
+        active_slices = {"axial": set(), "coronal": set(), "sagittal": set()}
+        for cand in candidate_results:
+            (z0, z1), (y0, y1), (x0, x1) = cand.bbox
+            active_slices["axial"].update(range(z0, z1 + 1))
+            active_slices["coronal"].update(range(y0, y1 + 1))
+            active_slices["sagittal"].update(range(x0, x1 + 1))
+        
+        active_slices = {k: sorted(list(v)) for k, v in active_slices.items()}
 
         # ── 6. Aggregate to patient level ─────
         if candidate_results:
@@ -402,7 +438,9 @@ class InferencePipeline3D:
             aggregation_method=agg_label,
             n_candidates_found=len(candidate_results),
             segmentation_mask=seg_mask,
+            volume_iso=volume_iso,
             candidates=candidate_results,
+            active_slices=active_slices,
             total_time_ms=total_ms,
             seg_time_ms=seg_time,
             cls_time_ms=cls_time,
@@ -422,10 +460,27 @@ class InferencePipeline3D:
         Run U-Net segmentation on the full volume using SlidingWindowInferer.
 
         Returns binary mask (D, H, W).
+
+        Preprocessing must match training transforms in monai_dataset_3d.py:
+          1. ScaleIntensityRange: HU [-1350, 150] → [0, 1]
+          2. NormalizeIntensity(channel_wise=True): zero-mean, unit-std
         """
-        # Prepare input: (1, 1, D, H, W) tensor
+        # Step 1: Window and scale to [0, 1] — matches ScaleIntensityRanged
         vol_windowed = np.clip(volume, LUNG_HU_MIN, LUNG_HU_MAX)
         vol_normed = (vol_windowed - LUNG_HU_MIN) / (LUNG_HU_MAX - LUNG_HU_MIN)
+
+        # Step 2: Zero-mean, unit-std — matches NormalizeIntensityd(channel_wise=True)
+        mean = vol_normed.mean()
+        std = vol_normed.std()
+        if std > 0:
+            vol_normed = (vol_normed - mean) / std
+
+        # ── Diagnostic: input statistics ──
+        print(f"\n  [DEBUG] Input volume shape: {volume.shape}")
+        print(f"  [DEBUG] HU range: [{volume.min():.1f}, {volume.max():.1f}]")
+        print(f"  [DEBUG] After norm: mean={vol_normed.mean():.4f}, "
+              f"std={vol_normed.std():.4f}, "
+              f"range=[{vol_normed.min():.4f}, {vol_normed.max():.4f}]")
 
         tensor = torch.from_numpy(vol_normed).float()
         tensor = tensor.unsqueeze(0).unsqueeze(0).to(self.device)  # (1,1,D,H,W)
@@ -433,8 +488,25 @@ class InferencePipeline3D:
         with torch.no_grad():
             output = self.inferer(tensor, self.unet)
 
+        # ── Diagnostic: raw model output ──
+        raw_logits = output.squeeze().cpu().numpy()
+        print(f"  [DEBUG] Raw logit range: [{raw_logits.min():.4f}, {raw_logits.max():.4f}]")
+        print(f"  [DEBUG] Raw logit mean: {raw_logits.mean():.4f}, std: {raw_logits.std():.4f}")
+
         probs = torch.sigmoid(output).squeeze().cpu().numpy()
+
+        # ── Diagnostic: probability distribution ──
+        print(f"  [DEBUG] Sigmoid prob range: [{probs.min():.6f}, {probs.max():.6f}]")
+        print(f"  [DEBUG] Sigmoid prob mean: {probs.mean():.6f}")
+        for t in [0.1, 0.2, 0.3, 0.4, 0.5]:
+            pct = 100 * (probs > t).mean()
+            print(f"  [DEBUG]   voxels > {t}: {pct:.4f}%")
+
         mask = (probs > self.seg_threshold).astype(np.bool_)
+
+        print(f"  [DEBUG] Seg threshold: {self.seg_threshold}")
+        print(f"  [DEBUG] Mask positive voxels: {mask.sum()} / {mask.size} "
+              f"({100 * mask.mean():.4f}%)")
 
         logger.debug("Segmentation mask: %d positive voxels (%.2f%%)",
                       mask.sum(), 100 * mask.mean())
@@ -462,10 +534,14 @@ class InferencePipeline3D:
 
             coords = np.argwhere(component)
             centroid = tuple(coords.mean(axis=0).astype(int))
+            z_min, y_min, x_min = coords.min(axis=0)
+            z_max, y_max, x_max = coords.max(axis=0)
+            bbox = ((int(z_min), int(z_max)), (int(y_min), int(y_max)), (int(x_min), int(x_max)))
 
             candidates.append({
                 "label": i,
                 "centroid": centroid,
+                "bbox": bbox,
                 "volume": vol,
             })
 
@@ -475,46 +551,73 @@ class InferencePipeline3D:
 
     # ── Candidate classification ──────────────
 
+    def _preprocess_crop(self, crop: np.ndarray) -> torch.Tensor:
+        """
+        Apply training-matched preprocessing to a 64³ HU crop.
+        Returns (1, 1, 64, 64, 64) tensor on self.device.
+        """
+        # Step 1: ScaleIntensityRange
+        crop_windowed = np.clip(crop, LUNG_HU_MIN, LUNG_HU_MAX)
+        crop_normed = ((crop_windowed - LUNG_HU_MIN) /
+                       (LUNG_HU_MAX - LUNG_HU_MIN))
+
+        # Step 2: NormalizeIntensity (zero-mean, unit-std)
+        mean = crop_normed.mean()
+        std = crop_normed.std()
+        if std > 0:
+            crop_normed = (crop_normed - mean) / std
+
+        tensor = torch.from_numpy(crop_normed).float()
+        return tensor.unsqueeze(0).unsqueeze(0).to(self.device)
+
     def _classify_candidates(
         self,
         volume: np.ndarray,
         candidates: List[Dict],
         threshold: float,
+        min_prob: float = 0.0,
     ) -> List[CandidateResult]:
         """
-        Crop 64³ around each candidate centroid and classify with ResNet.
+        Crop 64³ around each candidate centroid and classify with ResNet ONNX.
         """
         results = []
 
         for idx, cand in enumerate(candidates):
             centroid = cand["centroid"]
+            bbox = cand["bbox"]
 
-            # Extract 64³ crop
+            # Extract and preprocess 64³ crop
             crop = self._extract_crop(volume, centroid)
+            tensor = self._preprocess_crop(crop) # (1, 1, 64, 64, 64) torch.Tensor
 
-            # Preprocess: window + normalize
-            crop_windowed = np.clip(crop, LUNG_HU_MIN, LUNG_HU_MAX)
-            crop_normed = ((crop_windowed - LUNG_HU_MIN) /
-                           (LUNG_HU_MAX - LUNG_HU_MIN))
+            # Classify via ONNX
+            ort_inputs = {self.resnet_input_name: tensor.cpu().numpy()}
+            ort_outs = self.resnet_session.run(None, ort_inputs)
+            logit = ort_outs[0][0][0] # it's (1, 1)
+            
+            # Apply sigmoid
+            prob = 1.0 / (1.0 + np.exp(-logit))
 
-            # To tensor: (1, 1, 64, 64, 64)
-            tensor = torch.from_numpy(crop_normed).float()
-            tensor = tensor.unsqueeze(0).unsqueeze(0).to(self.device)
-
-            # Classify
-            with torch.no_grad():
-                logit = self.resnet.forward_scaled(tensor)
-                prob = torch.sigmoid(logit).item()
+            if prob < min_prob:
+                continue
 
             prediction = "Malignant" if prob > threshold else "Benign"
 
             results.append(CandidateResult(
                 candidate_index=idx,
                 centroid=centroid,
+                bbox=bbox,
                 volume_voxels=cand["volume"],
-                probability=prob,
+                probability=float(prob),
                 prediction=prediction,
             ))
+
+        # Sort by probability (most suspicious first)
+        results.sort(key=lambda r: r.probability, reverse=True)
+
+        # Re-index after sorting
+        for i, r in enumerate(results):
+            r.candidate_index = i
 
         return results
 
@@ -608,6 +711,12 @@ if __name__ == "__main__":
     p.add_argument("--aggregation", default="top_k",
                    choices=["max", "mean", "top_k"])
     p.add_argument("--k", type=int, default=5)
+    p.add_argument("--no_gradcam", action="store_true",
+                   help="Skip Grad-CAM generation")
+    p.add_argument("--gradcam_top_k", type=int, default=3,
+                   help="Generate Grad-CAM for top-k candidates")
+    p.add_argument("--output_dir", default="output",
+                   help="Directory to save Grad-CAM overlays")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -621,5 +730,14 @@ if __name__ == "__main__":
         args.dicom_dir,
         aggregation=args.aggregation,
         k=args.k,
+        generate_gradcam=not args.no_gradcam,
+        gradcam_top_k=args.gradcam_top_k,
     )
     print(result.summary())
+
+    # Save Grad-CAM overlays if generated
+    saved = result.save_gradcam_overlays(args.output_dir)
+    if saved:
+        print(f"\n  Saved {len(saved)} Grad-CAM overlays → {args.output_dir}/")
+    else:
+        print("\n  No Grad-CAM overlays to save (no candidates or --no_gradcam).")

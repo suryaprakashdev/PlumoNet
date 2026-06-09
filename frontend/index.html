@@ -1,0 +1,1126 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PulmoScan AI — Diagnostic Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap"
+        rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        :root {
+            --bg: #000000;
+            --surface: #0a0a0c;
+            --surface2: #111114;
+            --border: #1f1f24;
+            --border2: #2e2e36;
+            --text: #ededf0;
+            --muted: #8b8b93;
+            --dim: #55555a;
+            --blue: #0ea5e9;
+            --blue-glow: rgba(14, 165, 233, 0.12);
+            --red: #ef4444;
+            --amber: #f59e0b;
+            --green: #10b981;
+            --font: 'Inter', system-ui, sans-serif;
+            --mono: 'JetBrains Mono', monospace;
+        }
+
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html,
+        body {
+            height: 100%;
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--font);
+            font-size: 13px;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        body {
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            overflow-y: auto;
+        }
+
+        /* ─── HEADER ──────────────────────────────── */
+        .header {
+            height: 52px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+            position: sticky;
+            top: 0;
+            z-index: 50;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .brand-icon {
+            width: 28px;
+            height: 28px;
+            background: var(--blue);
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .brand-icon svg {
+            width: 16px;
+            height: 16px;
+            fill: #fff;
+        }
+
+        .brand-name {
+            font-size: 15px;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+        }
+
+        .brand-sub {
+            font-size: 12px;
+            color: var(--muted);
+            margin-left: 8px;
+            font-weight: 400;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .status-pill {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--border);
+            border-radius: 4px;
+            padding: 4px 10px;
+            font-family: var(--mono);
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--green);
+        }
+
+        .progress-bar {
+            height: 2px;
+            background: var(--blue);
+            width: 0%;
+            transition: width .3s;
+        }
+
+        /* ─── PATIENT BANNER ────────────────────────── */
+        .patient-banner {
+            display: none;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 10px 20px;
+            flex-shrink: 0;
+        }
+
+        .patient-row {
+            display: flex;
+            align-items: center;
+            gap: 28px;
+            flex-wrap: wrap;
+        }
+
+        .patient-avatar {
+            width: 38px;
+            height: 38px;
+            border-radius: 50%;
+            background: #0c2240;
+            border: 1.5px solid #1a4a80;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            color: var(--blue);
+            font-size: 14px;
+            flex-shrink: 0;
+        }
+
+        .patient-name {
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        .patient-mrn {
+            font-family: var(--mono);
+            color: var(--muted);
+            font-size: 11px;
+            margin-top: 1px;
+        }
+
+        .meta-col {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .meta-label {
+            font-size: 10px;
+            color: var(--dim);
+            text-transform: uppercase;
+            letter-spacing: .05em;
+        }
+
+        .meta-val {
+            font-weight: 500;
+            font-size: 12px;
+        }
+
+        .verdict-pill {
+            margin-left: auto;
+            padding: 5px 14px;
+            border-radius: 5px;
+            font-size: 12px;
+            font-weight: 700;
+            font-family: var(--mono);
+            text-transform: uppercase;
+            letter-spacing: .05em;
+        }
+
+        .verdict-mal {
+            background: #2d0d0d;
+            color: var(--red);
+            border: 1px solid #5c1a1a;
+        }
+
+        .verdict-ben {
+            background: #0a1f14;
+            color: var(--green);
+            border: 1px solid #1a4d30;
+        }
+
+        /* ─── WORKSPACE ─────────────────────────────── */
+        .workspace {
+            display: flex;
+            flex: 1;
+            min-height: 0;
+            position: relative;
+            overflow: hidden;
+            height: calc(100vh - 52px);
+        }
+
+        /* ─── LEFT SIDEBAR ──────────────────────────── */
+        .sidebar {
+            width: 268px;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            overflow: hidden;
+        }
+
+        .panel-hdr {
+            padding: 10px 14px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+            color: var(--muted);
+            border-bottom: 1px solid var(--border);
+            background: var(--bg);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+
+        .cand-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+        }
+
+        .cand-item {
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            margin-bottom: 7px;
+            cursor: pointer;
+            transition: border-color .15s, background .15s;
+            background: var(--bg);
+        }
+
+        .cand-item:hover {
+            border-color: var(--border2);
+        }
+
+        .cand-item.active {
+            border-color: var(--blue);
+            background: var(--blue-glow);
+        }
+
+        .cand-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 7px;
+        }
+
+        .cand-title {
+            font-weight: 600;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .cand-score {
+            font-family: var(--mono);
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        /* Only the red malignant triangle is visible */
+        .shape-mal {
+            width: 9px;
+            height: 9px;
+            background: var(--red);
+            clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
+            display: inline-block;
+        }
+
+        /* Hide benign and borderline shape indicators */
+        .shape-ben,
+        .shape-bor {
+            display: none !important;
+        }
+
+        .cand-bar {
+            height: 3px;
+            background: var(--border);
+            border-radius: 2px;
+            overflow: hidden;
+            margin-bottom: 7px;
+        }
+
+        .cand-bar-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width .6s;
+        }
+
+        .cand-footer {
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .cand-label {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+        }
+
+        .cand-coords {
+            font-family: var(--mono);
+            font-size: 10px;
+            color: var(--muted);
+        }
+
+        /* Metrics footer */
+        .metrics-footer {
+            padding: 10px 14px;
+            border-top: 1px solid var(--border);
+            font-family: var(--mono);
+            font-size: 10px;
+            color: var(--muted);
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 4px 16px;
+            flex-shrink: 0;
+        }
+
+        .metrics-footer span {
+            color: var(--text);
+        }
+
+        /* ─── MAIN VIEWPORT ─────────────────────────── */
+        .viewport {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg);
+            overflow: hidden;
+            min-width: 0;
+        }
+
+        .toolbar {
+            height: 40px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 0 14px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+
+        .tool-btn {
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--muted);
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: all .15s;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .tool-btn:hover {
+            background: var(--border);
+            color: var(--text);
+        }
+
+        .tool-btn.active {
+            background: var(--blue-glow);
+            color: var(--blue);
+            border-color: rgba(14, 165, 233, .3);
+        }
+
+        .tool-div {
+            width: 1px;
+            height: 18px;
+            background: var(--border2);
+            margin: 0 4px;
+        }
+
+        .new-study-btn {
+            margin-left: auto;
+            background: var(--border);
+            border: 1px solid var(--border2);
+            color: var(--text);
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: all .15s;
+        }
+
+        .new-study-btn:hover {
+            border-color: var(--blue);
+            color: var(--blue);
+        }
+
+        /* ─── MPR GRID ──────────────────────────────── */
+        .mpr-grid {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr;
+            grid-template-rows: 1fr 1fr 1fr;
+            gap: 2px;
+            background: var(--border);
+            min-height: 0;
+        }
+        @media (min-width: 1024px) {
+            .mpr-grid {
+                grid-template-columns: 1fr 1fr 1fr;
+                grid-template-rows: 1fr;
+            }
+        }
+
+        .mpr-cell {
+            background: var(--bg);
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        .mpr-tag {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            font-family: var(--mono);
+            font-size: 10px;
+            color: var(--muted);
+            pointer-events: none;
+            z-index: 2;
+            text-shadow: 0 1px 3px #000;
+        }
+
+        .mpr-img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            cursor: zoom-in;
+        }
+
+        .mpr-empty {
+            color: var(--dim);
+            font-size: 11px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .mpr-empty-icon {
+            font-size: 24px;
+        }
+
+        /* ─── UPLOAD OVERLAY ──────────────────────── */
+        .upload-overlay {
+            position: absolute;
+            inset: 0;
+            background: rgba(0, 0, 0, .88);
+            backdrop-filter: blur(6px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 40;
+        }
+
+        .upload-box {
+            background: var(--surface);
+            border: 1.5px dashed var(--border2);
+            border-radius: 12px;
+            padding: 44px 36px;
+            text-align: center;
+            max-width: 420px;
+            width: 90%;
+            transition: border-color .2s, background .2s;
+        }
+
+        .upload-box.drag-over {
+            border-color: var(--blue);
+            background: var(--blue-glow);
+        }
+
+        .upload-box h2 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .upload-box p {
+            color: var(--muted);
+            margin-bottom: 24px;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .btn-row {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+
+        .btn {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--border);
+            border: 1px solid var(--border2);
+            color: var(--text);
+            padding: 8px 18px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: all .15s;
+        }
+
+        .btn:hover {
+            border-color: var(--blue);
+            color: var(--blue);
+        }
+
+        .btn-primary {
+            background: var(--blue);
+            border-color: var(--blue);
+            color: #fff;
+            font-weight: 500;
+        }
+
+        .btn-primary:hover {
+            background: #0284c7;
+            border-color: #0284c7;
+            color: #fff;
+        }
+
+        .prog-status {
+            margin-top: 20px;
+            font-family: var(--mono);
+            font-size: 11px;
+            color: var(--blue);
+            display: none;
+            min-height: 16px;
+        }
+
+        .prog-track {
+            margin-top: 10px;
+            height: 2px;
+            background: var(--border2);
+            border-radius: 1px;
+        }
+
+        .prog-fill {
+            height: 100%;
+            background: var(--blue);
+            border-radius: 1px;
+            width: 0%;
+            transition: width .4s;
+        }
+
+        /* ─── ERROR TOAST ─────────────────────────── */
+        .error-toast {
+            position: fixed;
+            top: 64px;
+            right: 20px;
+            background: #2d0d0d;
+            color: #fca5a5;
+            padding: 10px 18px;
+            border-radius: 6px;
+            border: 1px solid #5c1a1a;
+            z-index: 200;
+            font-size: 12px;
+            display: none;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, .5);
+            max-width: 360px;
+        }
+
+        /* ─── MODAL ───────────────────────────────── */
+        .modal-bg {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, .9);
+            z-index: 300;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-bg.open {
+            display: flex;
+        }
+
+        .modal-img {
+            max-width: 92vw;
+            max-height: 88vh;
+            object-fit: contain;
+            border-radius: 6px;
+        }
+
+        .modal-close {
+            position: absolute;
+            top: 16px;
+            right: 20px;
+            font-size: 28px;
+            color: var(--muted);
+            cursor: pointer;
+            background: none;
+            border: none;
+            line-height: 1;
+        }
+
+        .modal-close:hover {
+            color: #fff;
+        }
+
+        /* ─── SCROLLBARS ─────────────────────────── */
+        ::-webkit-scrollbar {
+            width: 5px;
+            height: 5px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border2);
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--dim);
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- TOP PROGRESS BAR -->
+    <div id="prog-bar" style="height:2px;background:var(--blue);width:0%;transition:width .3s;flex-shrink:0"></div>
+
+    <!-- ERROR TOAST -->
+    <div class="error-toast" id="err-toast">⚠ <span id="err-msg"></span></div>
+
+    <!-- HEADER -->
+    <header class="header">
+        <div class="brand">
+            <div class="brand-icon">
+                <svg viewBox="0 0 24 24">
+                    <path
+                        d="M12 2C8 2 5 5 5 8c0 2 1 4 2 5l-2 7h14l-2-7c1-1 2-3 2-5 0-3-3-6-7-6zm-3 9c-1 0-2-1-2-2s1-2 2-2 2 1 2 2-1 2-2 2zm6 0c-1 0-2-1-2-2s1-2 2-2 2 1 2 2-1 2-2 2z" />
+                </svg>
+            </div>
+            <span class="brand-name">PulmoScan AI <span class="brand-sub">Diagnostic Dashboard</span></span>
+        </div>
+        <div class="header-right">
+            <div class="status-pill">
+                <div class="status-dot"></div>
+                BentoML :3001 Connected
+            </div>
+            <div id="hdr-clock" style="font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
+        </div>
+    </header>
+
+    <!-- PATIENT BANNER (hidden until result) -->
+    <div class="patient-banner" id="patient-banner">
+        <div class="patient-row">
+            <div class="patient-avatar" id="pat-initials">--</div>
+            <div>
+                <div class="patient-name" id="pat-name">—</div>
+                <div class="patient-mrn" id="pat-mrn">—</div>
+            </div>
+            <div class="meta-col">
+                <div class="meta-label">DOB (Age)</div>
+                <div class="meta-val"><span id="pat-dob">—</span> (<span id="pat-age">—</span>)</div>
+            </div>
+            <div class="meta-col">
+                <div class="meta-label">Study Date</div>
+                <div class="meta-val" id="pat-date">—</div>
+            </div>
+            <div class="meta-col">
+                <div class="meta-label">Ref. Physician</div>
+                <div class="meta-val" id="pat-physician">—</div>
+            </div>
+            <div class="meta-col">
+                <div class="meta-label">Series UID</div>
+                <div class="meta-val" style="font-family:var(--mono);font-size:10px" id="pat-series">—</div>
+            </div>
+            <div class="verdict-pill" id="pat-verdict" style="display:none"></div>
+        </div>
+    </div>
+
+    <!-- WORKSPACE -->
+    <div class="workspace" id="workspace">
+
+        <!-- UPLOAD OVERLAY -->
+        <div class="upload-overlay" id="upload-overlay">
+            <div class="upload-box" id="upload-zone" onclick="document.getElementById('zip-input').click()"
+                ondragover="event.preventDefault();this.classList.add('drag-over')"
+                ondragleave="this.classList.remove('drag-over')" ondrop="handleDrop(event)">
+                <div style="font-size:36px;margin-bottom:16px">🫁</div>
+                <h2>Import DICOM Study</h2>
+                <p>Drag & drop a <strong>.zip</strong> archive or select an uncompressed DICOM folder to begin AI
+                    inference.</p>
+                <div class="btn-row">
+                    <button class="btn btn-primary"
+                        onclick="event.stopPropagation();document.getElementById('zip-input').click()">
+                        📦 Upload ZIP
+                    </button>
+                    <button class="btn"
+                        onclick="event.stopPropagation();document.getElementById('folder-input').click()">
+                        📁 Open Folder
+                    </button>
+                </div>
+                <div class="prog-status" id="prog-status"></div>
+                <div class="prog-track" id="prog-track" style="display:none">
+                    <div class="prog-fill" id="prog-fill"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- LEFT SIDEBAR -->
+        <aside class="sidebar">
+            <div class="panel-hdr">
+                AI Findings
+                <span id="cand-count" style="color:var(--blue);font-size:11px">—</span>
+            </div>
+
+            <div class="cand-list" id="cand-list">
+                <div style="color:var(--dim);font-size:11px;text-align:center;padding:30px 16px">
+                    Run inference to see detected nodules
+                </div>
+            </div>
+
+            <!-- Metrics footer -->
+            <div class="metrics-footer" id="metrics-footer">
+                <span style="color:var(--muted)">Seg:</span> <span id="st-seg">—</span>
+                <span style="color:var(--muted)">Cls:</span> <span id="st-cls">—</span>
+                <span style="color:var(--muted)">Shape:</span> <span id="st-vol" style="grid-column:span 1">—</span>
+            </div>
+        </aside>
+
+        <!-- MAIN VIEWPORT -->
+        <main class="viewport">
+            <div class="toolbar">
+                <button class="tool-btn active" onclick="setActiveTool(this)">👆 Select</button>
+                <button class="tool-btn" onclick="setActiveTool(this)">✛ Crosshair</button>
+                <div class="tool-div"></div>
+                <button class="tool-btn" onclick="cycleCandidate(-1)">◀ Prev Nodule</button>
+                <button class="tool-btn" onclick="cycleCandidate(1)">Next Nodule ▶</button>
+                <button class="new-study-btn" onclick="resetStudy()">＋ New Study</button>
+            </div>
+
+            <div class="mpr-grid">
+                <div class="mpr-cell">
+                    <div class="mpr-tag" id="ax-tag">AXIAL</div>
+                    <div class="mpr-empty" id="ax-empty"><span class="mpr-empty-icon">🫁</span>Awaiting scan</div>
+                    <img id="ax-img" class="mpr-img" style="display:none" onclick="openModal(this.src)"
+                        alt="Axial slice">
+                </div>
+                <div class="mpr-cell">
+                    <div class="mpr-tag" id="cor-tag">CORONAL</div>
+                    <div class="mpr-empty" id="cor-empty"><span class="mpr-empty-icon">🫁</span>Awaiting scan</div>
+                    <img id="cor-img" class="mpr-img" style="display:none" onclick="openModal(this.src)"
+                        alt="Coronal slice">
+                </div>
+                <div class="mpr-cell">
+                    <div class="mpr-tag" id="sag-tag">SAGITTAL</div>
+                    <div class="mpr-empty" id="sag-empty"><span class="mpr-empty-icon">🫁</span>Awaiting scan</div>
+                    <img id="sag-img" class="mpr-img" style="display:none" onclick="openModal(this.src)"
+                        alt="Sagittal slice">
+                </div>
+            </div>
+        </main>
+
+    </div><!-- workspace -->
+
+    <!-- MODAL -->
+    <div class="modal-bg" id="modal" onclick="closeModal()">
+        <button class="modal-close" onclick="closeModal()">✕</button>
+        <img class="modal-img" id="modal-img" src="" alt="Enlarged view">
+    </div>
+
+    <input type="file" id="zip-input" accept=".zip" style="display:none" onchange="handleZip(this.files[0])">
+    <input type="file" id="folder-input" webkitdirectory style="display:none" onchange="handleFolder(this.files)">
+
+    <script>
+        const ENDPOINT = 'http://localhost:3000/predict';
+        let currentData = null;
+        let selectedIdx = 0;
+
+        // ─── CLOCK ───────────────────────────────────────────────────
+        setInterval(() => {
+            document.getElementById('hdr-clock').textContent = new Date().toLocaleTimeString('en-GB');
+        }, 1000);
+
+        // ─── PATIENT DATA ─────────────────────────────────────────────
+        const NAMES = ['Anderson, James R.', 'Chen, Robert W.', 'Martinez, David L.', 'Thompson, Michael K.', 'Williams, Patricia A.'];
+        const PHYSICIANS = ['Dr. Sarah Chen, MD', 'Dr. Michael Torres, MD', 'Dr. Emily Watson, MD', 'Dr. Raj Patel, MD'];
+        const DOBS = ['1958-03-14', '1962-07-22', '1955-11-08', '1949-04-30', '1967-09-15'];
+        const AGES = [68, 64, 71, 77, 59];
+
+        function setPatientInfo(patientId, score) {
+            const h = patientId.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+            const name = NAMES[h % NAMES.length];
+            document.getElementById('pat-initials').textContent = name.split(',')[0].split(' ').map(w => w[0]).join('').slice(0, 2);
+            document.getElementById('pat-name').textContent = name;
+            document.getElementById('pat-mrn').textContent = 'MRN-' + String(Math.abs(h * 1337 % 99999)).padStart(5, '0');
+            document.getElementById('pat-dob').textContent = DOBS[h % DOBS.length];
+            document.getElementById('pat-age').textContent = AGES[h % AGES.length] + ' yrs';
+            document.getElementById('pat-physician').textContent = PHYSICIANS[h % PHYSICIANS.length];
+            document.getElementById('pat-date').textContent = new Date().toISOString().slice(0, 10);
+            document.getElementById('pat-series').textContent = '...' + patientId.slice(-14);
+            document.getElementById('patient-banner').style.display = 'block';
+
+            // Verdict pill
+            const pill = document.getElementById('pat-verdict');
+            const isMal = score >= 0.5;
+            pill.textContent = isMal ? '⚠ MALIGNANT' : '✓ BENIGN';
+            pill.className = 'verdict-pill ' + (isMal ? 'verdict-mal' : 'verdict-ben');
+            pill.style.display = 'block';
+
+            adjustWorkspaceHeight();
+        }
+
+        function adjustWorkspaceHeight() {
+            const header = document.querySelector('.header').offsetHeight;
+            const banner = document.querySelector('.patient-banner').offsetHeight;
+            const progBar = 2;
+            const ws = document.getElementById('workspace');
+            ws.style.height = `calc(100vh - ${header + banner + progBar}px)`;
+        }
+
+        // ─── PROGRESS ─────────────────────────────────────────────────
+        function setProgress(pct, label) {
+            document.getElementById('prog-bar').style.width = pct + '%';
+            const st = document.getElementById('prog-status');
+            const tr = document.getElementById('prog-track');
+            st.style.display = 'block';
+            tr.style.display = 'block';
+            st.textContent = label;
+            document.getElementById('prog-fill').style.width = pct + '%';
+        }
+
+        function hideProgress() {
+            document.getElementById('prog-bar').style.width = '0%';
+        }
+
+        function showError(msg) {
+            const t = document.getElementById('err-toast');
+            document.getElementById('err-msg').textContent = msg;
+            t.style.display = 'block';
+            setTimeout(() => t.style.display = 'none', 7000);
+            setProgress(0, 'Error — see notification');
+        }
+
+        // ─── UPLOAD ───────────────────────────────────────────────────
+        async function handleZip(file) {
+            if (!file) return;
+            setProgress(25, 'Reading ZIP archive...');
+            await sendInference(file);
+        }
+
+        async function handleFolder(files) {
+            if (!files || !files.length) return;
+            setProgress(10, `Compressing ${files.length} DICOM files...`);
+            try {
+                const zip = new JSZip();
+                for (const f of files) zip.file(f.webkitRelativePath || f.name, f);
+                setProgress(35, 'Finalizing archive...');
+                const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 1 } });
+                setProgress(55, `Sending ${(blob.size / 1024 / 1024).toFixed(1)} MB to inference server...`);
+                await sendInference(blob);
+            } catch (e) { showError('Compression failed: ' + e.message); }
+        }
+
+        function handleDrop(e) {
+            e.preventDefault();
+            document.getElementById('upload-zone').classList.remove('drag-over');
+            const files = e.dataTransfer.files;
+            if (files.length === 1 && files[0].name.endsWith('.zip')) handleZip(files[0]);
+            else if (files.length > 1) handleFolder(files);
+            else showError('Drop a .zip file or a DICOM folder.');
+        }
+
+        async function sendInference(blob) {
+            try {
+                setProgress(65, 'Running 3D segmentation + classification (this takes ~2–3 min)...');
+                const fd = new FormData();
+                fd.append('dicom_zip', blob, 'upload.zip');
+                const resp = await fetch(ENDPOINT, {
+                    method: 'POST', body: fd,
+                    signal: AbortSignal.timeout(600000)
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${(await resp.text()).slice(0, 160)}`);
+                setProgress(95, 'Parsing results...');
+                const data = await resp.json();
+                hideProgress();
+                currentData = data;
+                renderResults(data);
+            } catch (e) {
+                showError('Inference error: ' + e.message);
+            }
+        }
+
+        // ─── RENDER ───────────────────────────────────────────────────
+        function probStyle(p) {
+            // Only malignant (>= 0.5) gets the red triangle shape indicator.
+            // Borderline and benign get no shape — their span renders but is hidden via CSS.
+            if (p >= 0.5) return { color: 'var(--red)',   shape: 'shape-mal', label: 'MALIGNANT' };
+            if (p >= 0.3) return { color: 'var(--amber)', shape: 'shape-bor', label: 'BORDERLINE' };
+            return             { color: 'var(--green)',   shape: 'shape-ben', label: 'BENIGN' };
+        }
+
+        function renderResults(d) {
+            const m = d.metadata || {};
+
+            // Hide upload overlay
+            document.getElementById('upload-overlay').style.display = 'none';
+
+            // Patient info
+            setPatientInfo(m.patient_id || 'UNKNOWN', d.patient_score || 0);
+
+            // Candidates
+            const cands = d.top_candidates || [];
+            document.getElementById('cand-count').textContent = cands.length + ' found';
+            document.getElementById('cand-list').innerHTML = cands.map((c, i) => {
+                const s = probStyle(c.prob);
+                const pct = (c.prob * 100).toFixed(1);
+                return `<div class="cand-item${i === 0 ? ' active' : ''}" id="cand-${i}" onclick="selectCandidate(${i})">
+      <div class="cand-header">
+        <div class="cand-title"><span class="${s.shape}"></span> Nodule 0${i + 1}</div>
+        <div class="cand-score" style="color:${s.color}">${pct}%</div>
+      </div>
+      <div class="cand-bar"><div class="cand-bar-fill" style="width:${pct}%;background:${s.color}"></div></div>
+      <div class="cand-footer">
+        <span class="cand-label" style="color:${s.color}">${s.label}</span>
+        <span class="cand-coords">[${(c.centroid || []).map(v => Math.round(v)).join(', ')}]</span>
+      </div>
+    </div>`;
+            }).join('');
+
+            // Metrics
+            document.getElementById('st-seg').textContent = (m.seg_time_s || '?') + 's';
+            document.getElementById('st-cls').textContent = (m.cls_time_s || '?') + 's';
+            document.getElementById('st-vol').textContent = (m.volume_shape || []).join('×') || '—';
+
+            selectCandidate(0);
+        }
+
+        function selectCandidate(idx) {
+            if (!currentData) return;
+            const cands = currentData.top_candidates || [];
+            if (idx < 0 || idx >= cands.length) return;
+
+            selectedIdx = idx;
+            document.querySelectorAll('.cand-item').forEach(el => el.classList.remove('active'));
+            const el = document.getElementById('cand-' + idx);
+            if (el) { el.classList.add('active'); el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+
+            const cand = cands[idx];
+            const views = currentData.candidate_views || {};
+
+            // Reset all cells
+            ['ax', 'cor', 'sag'].forEach(p => {
+                document.getElementById(p + '-empty').style.display = 'flex';
+                document.getElementById(p + '-img').style.display = 'none';
+            });
+
+            if (views) {
+                const z = Math.round(cand.centroid[0]);
+                const y = Math.round(cand.centroid[1]);
+                const x = Math.round(cand.centroid[2]);
+
+                document.getElementById('ax-tag').textContent = `AXIAL — Z: ${z}`;
+                document.getElementById('cor-tag').textContent = `CORONAL — Y: ${y}`;
+                document.getElementById('sag-tag').textContent = `SAGITTAL — X: ${x}`;
+
+                showSlice('ax', views.axial[z] ? views.axial[z].image : null);
+                showSlice('cor', views.coronal[y] ? views.coronal[y].image : null);
+                showSlice('sag', views.sagittal[x] ? views.sagittal[x].image : null);
+            } else {
+                ['ax', 'cor', 'sag'].forEach(p => {
+                    document.getElementById(p + '-empty').innerHTML =
+                        '<span class="mpr-empty-icon">⚠</span>No slice data available';
+                });
+            }
+        }
+
+        function showSlice(prefix, b64) {
+            if (!b64) return;
+            const img = document.getElementById(prefix + '-img');
+            img.src = 'data:image/png;base64,' + b64;
+            img.style.display = 'block';
+            document.getElementById(prefix + '-empty').style.display = 'none';
+        }
+
+        function setActiveTool(btn) {
+            document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+        }
+
+        function cycleCandidate(dir) {
+            if (!currentData) return;
+            const n = (currentData.top_candidates || []).length;
+            if (!n) return;
+            selectCandidate((selectedIdx + dir + n) % n);
+        }
+
+        function resetStudy() {
+            currentData = null; selectedIdx = 0;
+            document.getElementById('upload-overlay').style.display = 'flex';
+            document.getElementById('patient-banner').style.display = 'none';
+            document.getElementById('pat-verdict').style.display = 'none';
+            document.getElementById('cand-list').innerHTML =
+                '<div style="color:var(--dim);font-size:11px;text-align:center;padding:30px 16px">Run inference to see detected nodules</div>';
+            ['ax', 'cor', 'sag'].forEach(p => {
+                document.getElementById(p + '-empty').style.display = 'flex';
+                document.getElementById(p + '-empty').innerHTML = '<span class="mpr-empty-icon">🫁</span>Awaiting scan';
+                document.getElementById(p + '-img').style.display = 'none';
+            });
+            ['st-seg', 'st-cls', 'st-vol', 'cand-count'].forEach(id => document.getElementById(id).textContent = '—');
+            document.getElementById('workspace').style.height = 'calc(100vh - 54px)';
+            document.getElementById('zip-input').value = '';
+            document.getElementById('folder-input').value = '';
+        }
+
+        // ─── MODAL ────────────────────────────────────────────────────
+        let modalScale = 1;
+        let modalPanning = false;
+        let modalPointX = 0;
+        let modalPointY = 0;
+        let modalStart = { x: 0, y: 0 };
+        const modalImg = document.getElementById('modal-img');
+
+        function setModalTransform() {
+            modalImg.style.transform = `translate(${modalPointX}px, ${modalPointY}px) scale(${modalScale})`;
+        }
+
+        modalImg.onmousedown = function (e) {
+            e.preventDefault();
+            modalStart = { x: e.clientX - modalPointX, y: e.clientY - modalPointY };
+            modalPanning = true;
+        }
+
+        window.onmouseup = function (e) { modalPanning = false; }
+
+        window.onmousemove = function (e) {
+            if (!modalPanning) return;
+            e.preventDefault();
+            modalPointX = (e.clientX - modalStart.x);
+            modalPointY = (e.clientY - modalStart.y);
+            setModalTransform();
+        }
+
+        document.getElementById('modal').onwheel = function (e) {
+            e.preventDefault();
+            const xs = (e.clientX - modalPointX) / modalScale;
+            const ys = (e.clientY - modalPointY) / modalScale;
+            const delta = (e.wheelDelta ? e.wheelDelta : -e.deltaY);
+            if (delta > 0) { modalScale *= 1.1; } else { modalScale /= 1.1; }
+            modalScale = Math.min(Math.max(0.5, modalScale), 10);
+            modalPointX = e.clientX - xs * modalScale;
+            modalPointY = e.clientY - ys * modalScale;
+            setModalTransform();
+        }
+
+        function openModal(src) {
+            modalScale = 1; modalPointX = 0; modalPointY = 0;
+            setModalTransform();
+            document.getElementById('modal-img').src = src;
+            document.getElementById('modal').classList.add('open');
+        }
+        function closeModal() { document.getElementById('modal').classList.remove('open'); }
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+        window.addEventListener('dragover', e => e.preventDefault());
+        window.addEventListener('drop', e => e.preventDefault());
+    </script>
+</body>
+</html>

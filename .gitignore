@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# MacOS
+.DS_Store
+
+# DICOM data
+*.dcm
+*.zip
+
+# Virtual environments
+venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# BentoML
+bento/
