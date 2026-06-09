@@ -5,6 +5,7 @@ include:
   - "inference_3d.py"
   - "unet3d.py"
   - "resnet3d.py"
+  - "frontend/**"
   - "preprocessing.py"
   - "checkpoints/unet3d.onnx"
   - "checkpoints/resnet3d.onnx"

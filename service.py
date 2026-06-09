@@ -4,14 +4,14 @@ import base64
 import shutil
 import tempfile
 from pathlib import Path
-
+from starlette.applications import Starlette
+from starlette.staticfiles import StaticFiles
 import numpy as np
 import cv2
 import bentoml
-
+from bentoml import asgi_app
 with bentoml.importing():
     from inference_3d import InferencePipeline3D, load_dicom_volume
-
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -76,9 +76,20 @@ def generate_annotated_slice(arr2d, mask2d=None, candidates=None, vmin=-1000, vm
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+frontend_app = Starlette()
 
+frontend_app.mount(
+    "/",
+    StaticFiles(
+        directory=os.path.join(BASE_DIR, "frontend"),
+        html=True,
+    ),
+    name="frontend",
+)
+
+@asgi_app(frontend_app, path="/ui")
 @bentoml.service(
-    resources={"gpu": 1, "memory": "8Gi"},
+    resources={"memory": "4Gi"},
     traffic={"timeout": 600},
     http={
         "cors": {
@@ -87,7 +98,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
             "access_control_allow_methods": ["GET", "POST", "OPTIONS"],
             "access_control_allow_headers": ["*"],
         }
-    }
+    },
 )
 class LungNoduleService:
 
