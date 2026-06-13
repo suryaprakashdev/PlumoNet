@@ -42,30 +42,17 @@ def generate_annotated_slice(arr2d, mask2d=None, candidates=None, vmin=-1000, vm
     # Convert to BGR for colored overlays
     img_bgr = cv2.cvtColor(img_smooth, cv2.COLOR_GRAY2BGR)
 
-    # Only annotate malignant candidates (prob >= 0.5); skip benign/borderline entirely
-    malignant_candidates = [c for c in (candidates or []) if c["probability"] >= 0.5]
-
-    if mask2d is not None and mask2d.any() and malignant_candidates:
-        mask_8u = (mask2d > 0.5).astype(np.uint8) * 255
-
-        # Find contours
-        contours, _ = cv2.findContours(mask_8u, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        RED = (0, 0, 255)  # BGR — single color for all malignant markers
-
-        for cand in malignant_candidates:
-            prob = cand["probability"]
-            cy, cx = cand["center_2d"]
-
-            # Draw marker at centroid
-            cv2.drawMarker(img_bgr, (cx, cy), RED, cv2.MARKER_CROSS, 10, 2)
-
-            # Draw label
-            label = f"#{cand['candidate_index']} ({prob:.0%})"
-            cv2.putText(img_bgr, label, (cx + 5, cy - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RED, 1, cv2.LINE_AA)
-
-        # Draw contours in red only when malignant candidates are present on this slice
-        cv2.drawContours(img_bgr, contours, -1, RED, 1, cv2.LINE_AA)
+    # Only draw crosshair + label for malignant candidates (prob >= 0.5)
+    # No contours, no segmentation overlays — clean scan with markers only
+    RED = (0, 0, 255)  # BGR
+    for cand in (candidates or []):
+        if cand["probability"] < 0.5:
+            continue
+        prob = cand["probability"]
+        cy, cx = cand["center_2d"]
+        cv2.drawMarker(img_bgr, (cx, cy), RED, cv2.MARKER_CROSS, 10, 2)
+        label = f"#{cand['candidate_index']} ({prob:.0%})"
+        cv2.putText(img_bgr, label, (cx + 5, cy - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, RED, 1, cv2.LINE_AA)
 
     # Encode to base64
     _, buffer = cv2.imencode('.png', img_bgr)
