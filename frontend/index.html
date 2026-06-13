@@ -770,7 +770,7 @@
         <div class="header-right">
             <div class="status-pill">
                 <div class="status-dot"></div>
-                BentoML :3001 Connected
+                <span id="api-status">BentoML Connected</span>
             </div>
             <div id="hdr-clock" style="font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
         </div>
@@ -948,7 +948,9 @@
     <input type="file" id="folder-input" webkitdirectory style="display:none" onchange="handleFolder(this.files)">
 
     <script>
-        const ENDPOINT = `${window.location.origin}/pat-verdict`;
+        const IS_LOCAL = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+        const ENDPOINT = IS_LOCAL ? `http://${location.hostname}:3000/predict` : `/predict`;
+        document.getElementById('api-status').textContent = IS_LOCAL ? 'BentoML :3000 Connected' : 'BentoML Cloud Run';
         let currentData = null;
         let selectedIdx = 0;
 
