@@ -7,7 +7,7 @@ __pycache__/
 
 # DICOM data
 *.dcm
-*.zip
+
 
 # Virtual environments
 venv/
