@@ -948,7 +948,7 @@
     <input type="file" id="folder-input" webkitdirectory style="display:none" onchange="handleFolder(this.files)">
 
     <script>
-        const ENDPOINT = `http://localhost:3000/predict`;
+        const ENDPOINT = `${window.location.origin}/pat-verdict`;
         let currentData = null;
         let selectedIdx = 0;
 
