@@ -105,9 +105,6 @@ class LungNoduleService:
             shutil.unpack_archive(str(dicom_zip), tmpdir)
             dicom_root = find_dicom_root(tmpdir)
 
-            # Load full volume BEFORE run_volume (files still on disk here)
-            full_vol, _ = load_dicom_volume(dicom_root)  # (D, H, W) in HU
-
             # Run segmentation + classification
             result = self.pipeline.run_volume(
                 dicom_root,
