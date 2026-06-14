@@ -1,0 +1,11 @@
+# Sample DICOM — fetched from GitHub LFS at runtime, not needed in image
+frontend/dicoms.zip
+
+# Dev/local artifacts
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitattributes
+*.md
+.DS_Store
