@@ -1,5 +1,9 @@
 service: "service:LungNoduleService"
 
+labels:
+  owner: bentoml-team
+  project: gallery
+
 include:
   - "service.py"
   - "inference_3d.py"
@@ -25,3 +29,7 @@ python:
     - connected-components-3d
     - transformers
     - matplotlib
+docker:
+  system_packages:
+    - libgl1-mesa-glx
+    - libglib2.0-0
