@@ -3,13 +3,17 @@ import io
 import base64
 import shutil
 import tempfile
-from pathlib import Path
+import uuid
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+load_dotenv()
 from starlette.applications import Starlette
 from starlette.staticfiles import StaticFiles
 import numpy as np
 import cv2
 import bentoml
 from bentoml import asgi_app
+from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 with bentoml.importing():
     from inference_3d import InferencePipeline3D, load_dicom_volume
 
@@ -59,6 +63,40 @@ def generate_annotated_slice(arr2d, mask2d=None, candidates=None, vmin=-1000, vm
     return base64.b64encode(buffer).decode()
 
 
+# ─── Azure Blob Storage Helpers ───────────────────────────────────────────────
+
+_STORAGE_CONTAINER = "dicom-uploads"
+
+def _blob_service_client() -> BlobServiceClient:
+    return BlobServiceClient.from_connection_string(
+        os.environ["AZURE_STORAGE_CONNECTION_STRING"]
+    )
+
+def _generate_sas_url(blob_name: str, expiry_minutes: int = 15) -> str:
+    c = _blob_service_client()
+    token = generate_blob_sas(
+        account_name=c.account_name,
+        container_name=_STORAGE_CONTAINER,
+        blob_name=blob_name,
+        account_key=c.credential.account_key,
+        permission=BlobSasPermissions(write=True),
+        expiry=datetime.now(timezone.utc) + timedelta(minutes=expiry_minutes),
+    )
+    return f"https://{c.account_name}.blob.core.windows.net/{_STORAGE_CONTAINER}/{blob_name}?{token}"
+
+def _download_blob(blob_name: str, dest_dir: str) -> str:
+    blob = _blob_service_client().get_blob_client(container=_STORAGE_CONTAINER, blob=blob_name)
+    zip_path = os.path.join(dest_dir, "upload.zip")
+    with open(zip_path, "wb") as f:
+        blob.download_blob().readinto(f)
+    return zip_path
+
+def _delete_blob(blob_name: str) -> None:
+    _blob_service_client().get_blob_client(
+        container=_STORAGE_CONTAINER, blob=blob_name
+    ).delete_blob()
+
+
 # ─── BentoML Service ───────────────────────────────────────────────────────────
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -96,13 +134,20 @@ class LungNoduleService:
         )
 
     @bentoml.api
-    def predict(self, dicom_zip: Path) -> dict:
+    def get_upload_url(self) -> dict:
+        blob_name = f"scans/{uuid.uuid4()}.zip"
+        return {"sas_url": _generate_sas_url(blob_name), "blob_name": blob_name}
+
+    @bentoml.api
+    def predict(self, blob_name: str) -> dict:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             gradcam_dir = os.path.join(tmpdir, "gradcam_out")
             os.makedirs(gradcam_dir, exist_ok=True)
 
-            shutil.unpack_archive(str(dicom_zip), tmpdir)
+            zip_path = _download_blob(blob_name, tmpdir)
+            _delete_blob(blob_name)
+            shutil.unpack_archive(zip_path, tmpdir)
             dicom_root = find_dicom_root(tmpdir)
 
             # Run segmentation + classification

@@ -18,3 +18,5 @@ venv/
 
 # BentoML
 bento/
+
+CLAUDE.md

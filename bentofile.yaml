@@ -29,6 +29,7 @@ python:
     - connected-components-3d
     - transformers
     - matplotlib
+    - azure-storage-blob>=12.19.0
 docker:
   system_packages:
     - libgl1-mesa-glx

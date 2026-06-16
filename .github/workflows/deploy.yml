@@ -1,0 +1,42 @@
+name: Build and deploy PlumoNet to Azure Container Apps
+
+on:
+  push:
+    branches: [development]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.PULMONET_AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.PULMONET_AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.PULMONET_AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.PULMONET_REGISTRY_URL }}
+          username: ${{ secrets.PULMONET_REGISTRY_USERNAME }}
+          password: ${{ secrets.PULMONET_REGISTRY_PASSWORD }}
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t ${{ secrets.PULMONET_REGISTRY_URL }}/pulmonet:${{ github.sha }} .
+          docker push ${{ secrets.PULMONET_REGISTRY_URL }}/pulmonet:${{ github.sha }}
+
+      - name: Deploy to Azure Container Apps
+        uses: azure/container-apps-deploy-action@v2
+        with:
+          containerAppName: pulmonet
+          resourceGroup: lidc-rg
+          imageToDeploy: ${{ secrets.PULMONET_REGISTRY_URL }}/pulmonet:${{ github.sha }}
