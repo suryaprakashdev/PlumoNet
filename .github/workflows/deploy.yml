@@ -37,3 +37,6 @@ jobs:
           containerAppName: pulmonet
           resourceGroup: lidc-rg
           imageToDeploy: ${{ secrets.PULMONET_REGISTRY_URL }}/pulmonet:${{ github.sha }}
+          registryUrl: ${{ secrets.PULMONET_REGISTRY_URL }}
+          registryUsername: ${{ secrets.PULMONET_REGISTRY_USERNAME }}
+          registryPassword: ${{ secrets.PULMONET_REGISTRY_PASSWORD }}
