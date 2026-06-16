@@ -9,18 +9,15 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
       contents: read
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure Login (OIDC)
+      - name: Azure Login
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.PULMONET_AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.PULMONET_AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.PULMONET_AZURE_SUBSCRIPTION_ID }}
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Log in to ACR
         uses: docker/login-action@v3
@@ -33,9 +30,6 @@ jobs:
         run: |
           docker build -t ${{ secrets.PULMONET_REGISTRY_URL }}/pulmonet:${{ github.sha }} .
           docker push ${{ secrets.PULMONET_REGISTRY_URL }}/pulmonet:${{ github.sha }}
-
-      - name: Set Azure subscription
-        run: az account set --subscription ${{ secrets.PULMONET_AZURE_SUBSCRIPTION_ID }}
 
       - name: Deploy to Azure Container Apps
         uses: azure/container-apps-deploy-action@v2
