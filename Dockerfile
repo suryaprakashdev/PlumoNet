@@ -1,20 +1,17 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-COPY . .
-
-# 1. Install required system/OS libraries for OpenGL/OpenCV support
-RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     libglib2.0-0 \
+    libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade pip
-RUN pip install bentoml
-RUN pip install -r requirements.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir bentoml \
+    && pip install --no-cache-dir -r requirements.txt
 
-EXPOSE 8080
+COPY . .
 
-CMD bentoml serve service:LungNoduleService --host 0.0.0.0 --port ${PORT:-3000}
-
+CMD bentoml serve service:LungNoduleService --host 0.0.0.0 --port ${PORT:-3000} --development

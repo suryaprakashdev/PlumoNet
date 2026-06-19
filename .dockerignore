@@ -1,11 +1,26 @@
-# Sample DICOM — fetched from GitHub LFS at runtime, not needed in image
-frontend/dicoms.zip
+# Local dev environment
+venv/
+.env
 
-# Dev/local artifacts
+# Git
+.git/
+.gitattributes
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
-.git/
-.gitattributes
+
+# PyTorch checkpoints — service uses ONNX only
+checkpoints/*.pth
+
+# Dev artifacts
+*.ipynb
+*.png
+checkpoints.zip
+results/
+frontend/dicoms.zip
+
+# Docs
 *.md
 .DS_Store
