@@ -1,5 +1,5 @@
 /**
- * PulmoScan AI — Frontend (rich display + chunked upload)
+ * PulmoNet — Frontend (rich display + chunked upload)
  * ======================================================
  * Display logic ported from the working repo frontend:
  *   - Nodule 0N naming, prob-colored (red/amber/green), centroid coords
@@ -25,25 +25,20 @@ setInterval(() => {
   if (el) el.textContent = new Date().toLocaleTimeString("en-GB");
 }, 1000);
 
-// ─── PATIENT DATA (deterministic mock banner from patient_id) ─
-const NAMES = ['Anderson, James R.', 'Chen, Robert W.', 'Martinez, David L.', 'Thompson, Michael K.', 'Williams, Patricia A.'];
-const PHYSICIANS = ['Dr. Sarah Chen, MD', 'Dr. Michael Torres, MD', 'Dr. Emily Watson, MD', 'Dr. Raj Patel, MD'];
-const DOBS = ['1958-03-14', '1962-07-22', '1955-11-08', '1949-04-30', '1967-09-15'];
-const AGES = [68, 64, 71, 77, 59];
+// ─── STUDY BANNER (real DICOM metadata only — no fabricated identity) ─
 
-function setPatientInfo(patientId, score) {
-  const id = patientId || "UNKNOWN";
-  const h = id.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-  const name = NAMES[h % NAMES.length];
-  document.getElementById('pat-initials').textContent =
-    name.split(',')[0].split(' ').map(w => w[0]).join('').slice(0, 2);
-  document.getElementById('pat-name').textContent = name;
-  document.getElementById('pat-mrn').textContent = 'MRN-' + String(Math.abs(h * 1337 % 99999)).padStart(5, '0');
-  document.getElementById('pat-dob').textContent = DOBS[h % DOBS.length];
-  document.getElementById('pat-age').textContent = AGES[h % AGES.length] + ' yrs';
-  document.getElementById('pat-physician').textContent = PHYSICIANS[h % PHYSICIANS.length];
-  document.getElementById('pat-date').textContent = new Date().toISOString().slice(0, 10);
-  document.getElementById('pat-series').textContent = '...' + id.slice(-14);
+// DICOM StudyDate is "YYYYMMDD"; render as "YYYY-MM-DD" if present and well-formed.
+function formatStudyDate(raw) {
+  if (!raw || raw.length !== 8) return raw || '—';
+  return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
+}
+
+function setPatientInfo(metadata, score) {
+  const m = metadata || {};
+  document.getElementById('pat-id').textContent = m.patient_id || 'UNKNOWN';
+  document.getElementById('pat-date').textContent = formatStudyDate(m.study_date);
+  document.getElementById('pat-series').textContent = m.series_uid || '—';
+  document.getElementById('pat-volume').textContent = (m.volume_shape || []).join('×') || '—';
   document.getElementById('patient-banner').style.display = 'block';
 
   const pill = document.getElementById('pat-verdict');
@@ -63,9 +58,11 @@ function adjustWorkspaceHeight() {
 }
 
 // ─── PROGRESS VISUALIZER ──────────────────────────────────────
+// Driven by real SSE progress events from modal_inference.py (Pattern 5),
+// not a wall-clock guess — see mapInferenceEvent() below for the stage→%
+// mapping used once the upload phase (0-60%) hands off to inference.
 let _timerInterval = null;
 let _inferenceStart = null;
-const EXPECTED_INFERENCE_S = 150;
 const STAGE_THRESHOLDS = [0, 45, 80, 93, 100];
 
 function _updateStages(pct) {
@@ -89,6 +86,8 @@ function _setRing(pct) {
   if (lbl) lbl.textContent = Math.round(pct) + '%';
 }
 
+// Plain running clock — no longer used to interpolate progress, since real
+// per-stage events drive the percentage now.
 function _startElapsedTimer() {
   _inferenceStart = Date.now();
   if (_timerInterval) clearInterval(_timerInterval);
@@ -96,17 +95,6 @@ function _startElapsedTimer() {
     const elapsed = Math.floor((Date.now() - _inferenceStart) / 1000);
     const el = document.getElementById('elapsed-time');
     if (el) el.textContent = elapsed + 's';
-
-    const barPct = parseFloat(document.getElementById('prog-fill').style.width || '0');
-    if (barPct >= 65 && barPct < 95) {
-      const timePct = Math.min(elapsed / EXPECTED_INFERENCE_S, 1);
-      _setRing(Math.min(65 + timePct * (93 - 65), 93));
-      const rem = document.getElementById('remain-time');
-      if (rem) {
-        const secsLeft = Math.max(0, EXPECTED_INFERENCE_S - elapsed);
-        rem.textContent = secsLeft > 0 ? secsLeft + 's' : 'almost done…';
-      }
-    }
   }, 1000);
 }
 
@@ -119,10 +107,42 @@ function setProgress(pct, label) {
   if (st) st.textContent = label;
   const fill = document.getElementById('prog-fill');
   if (fill) fill.style.width = pct + '%';
-  const barPct = parseFloat(fill ? fill.style.width : '0');
-  if (barPct < 65 || barPct >= 93) _setRing(pct);
+  _setRing(pct);
   _updateStages(pct);
   if (pct >= 65 && !_timerInterval) _startElapsedTimer();
+}
+
+// Maps one real SSE event from modal_inference.py to a (pct, label) pair.
+// Returns null for events that don't move the bar (so the caller keeps the
+// previous state) and { done: true, result } / { error: true, message } for
+// terminal events.
+function mapInferenceEvent(evt) {
+  switch (evt.stage) {
+    case 'downloaded':
+      return { pct: 60, label: 'Scan received — starting analysis...' };
+    case 'preprocessing':
+      return evt.status === 'started'
+        ? { pct: 62, label: 'Preprocessing volume...' }
+        : { pct: 68, label: 'Preprocessing complete' };
+    case 'segmentation':
+      return evt.status === 'started'
+        ? { pct: 70, label: 'Running 3D segmentation...' }
+        : { pct: 80, label: 'Segmentation complete' };
+    case 'classifying': {
+      const frac = evt.total ? evt.current / evt.total : 1;
+      return { pct: 80 + frac * 10, label: `Classifying candidate ${evt.current}/${evt.total}...` };
+    }
+    case 'rendering': {
+      const frac = evt.total ? evt.current / evt.total : 1;
+      return { pct: 90 + frac * 7, label: `Rendering views ${evt.current}/${evt.total}...` };
+    }
+    case 'done':
+      return { done: true, result: evt.result };
+    case 'error':
+      return { error: true, message: evt.message || 'Inference failed' };
+    default:
+      return null;
+  }
 }
 
 function hideProgress() {
@@ -182,36 +202,121 @@ function handleDrop(event) {
   else showError('Drop a .zip file or a DICOM folder.');
 }
 
-function runSample() {
-  showError('Sample study not available in this build. Please upload a DICOM ZIP.');
-}
+// Permanent, curated sample scan (copied once into Blob Storage) — lets
+// "Run Sample" skip the upload step entirely and jump straight to inference.
+const SAMPLE_BLOB_NAME = 'samples/lidc-idri-sample.zip';
 
-// ─── INFERENCE (chunked upload → predict) ─────────────────────
-async function sendInference(blob) {
+async function runSample() {
+  const btn = document.getElementById('sample-btn');
+  if (btn) btn.disabled = true;
   try {
     _updateStages(0);
-    const blobName = await uploadFileChunked(blob);
-    if (!blobName) { showError('Upload failed'); return; }
+    setProgress(58, 'Loading sample scan (LIDC-IDRI)...');
+    await runPrediction(SAMPLE_BLOB_NAME);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 
-    setProgress(65, 'Running 3D segmentation + classification (~2–3 min)...');
+// ─── INFERENCE (chunked upload → streaming predict) ────────────
+// Note: deliberately not using EventSource — it's GET-only (we need to POST
+// blob_name) and it auto-reconnects on any network hiccup, which here would
+// risk silently re-triggering a second, expensive GPU run.
+const STREAM_INACTIVITY_MS = 90000; // no SSE frame for this long = stalled
+
+async function sendInference(blob) {
+  _updateStages(0);
+  let blobName;
+  try {
+    blobName = await uploadFileChunked(blob);
+  } catch (e) {
+    showError('Upload failed: ' + e.message);
+    return;
+  }
+  if (!blobName) { showError('Upload failed'); return; }
+
+  setProgress(58, 'Starting 3D segmentation + classification...');
+  await runPrediction(blobName);
+}
+
+// Streams /api/predict for an already-uploaded blob_name and renders the
+// result. Shared by sendInference() (after upload) and runSample() (which
+// skips upload entirely, using a pre-existing blob).
+async function runPrediction(blobName) {
+  const controller = new AbortController();
+  const overallTimeout = setTimeout(() => controller.abort(), 600000);
+  let inactivityTimer = null;
+  const armInactivityWatchdog = () => {
+    if (inactivityTimer) clearTimeout(inactivityTimer);
+    inactivityTimer = setTimeout(() => controller.abort(), STREAM_INACTIVITY_MS);
+  };
+
+  try {
     const resp = await fetch(`${API_BASE}/predict`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ blob_name: blobName }),
-      signal: AbortSignal.timeout(600000),
+      signal: controller.signal,
     });
-    if (!resp.ok) {
+    if (!resp.ok || !resp.body) {
       const txt = await resp.text().catch(() => '');
       throw new Error(`HTTP ${resp.status}: ${txt.slice(0, 160)}`);
     }
 
-    setProgress(95, 'Parsing results...');
-    const data = await resp.json();
-    hideProgress();
-    currentData = data;
-    renderResults(data);
+    armInactivityWatchdog();
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finished = false;
+
+    while (!finished) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      armInactivityWatchdog();
+
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop(); // keep the last, possibly-partial frame
+
+      for (const frame of frames) {
+        if (!frame.startsWith('data: ')) continue;
+        let evt;
+        try {
+          evt = JSON.parse(frame.slice(6));
+        } catch {
+          continue; // malformed frame — skip rather than crash the stream
+        }
+        const mapped = mapInferenceEvent(evt);
+        if (!mapped) continue;
+
+        if (mapped.error) {
+          showError('Inference error: ' + mapped.message);
+          finished = true;
+          break;
+        }
+        if (mapped.done) {
+          hideProgress();
+          currentData = mapped.result;
+          renderResults(mapped.result);
+          finished = true;
+          break;
+        }
+        setProgress(mapped.pct, mapped.label);
+      }
+    }
+
+    if (!finished) {
+      showError('Inference stream ended unexpectedly — please retry.');
+    }
   } catch (e) {
-    showError('Inference error: ' + e.message);
+    if (e.name === 'AbortError') {
+      showError('Inference stream stalled or timed out — please retry.');
+    } else {
+      showError('Inference error: ' + e.message);
+    }
+  } finally {
+    clearTimeout(overallTimeout);
+    if (inactivityTimer) clearTimeout(inactivityTimer);
   }
 }
 
@@ -276,7 +381,7 @@ function probStyle(p) {
 function renderResults(d) {
   const m = d.metadata || {};
   document.getElementById('upload-overlay').style.display = 'none';
-  setPatientInfo(m.patient_id || 'UNKNOWN', d.patient_score || 0);
+  setPatientInfo(m, d.patient_score || 0);
 
   const cands = d.top_candidates || [];
   document.getElementById('cand-count').textContent = cands.length + ' found';

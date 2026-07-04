@@ -2,7 +2,7 @@ name: Build and deploy PlumoNet to Azure Container Apps
 
 on:
   push:
-    branches: [main]
+    branches: [production/deployment]
   workflow_dispatch:
 
 jobs:
@@ -40,3 +40,7 @@ jobs:
           registryUrl: ${{ secrets.PULMONET_REGISTRY_URL }}
           registryUsername: ${{ secrets.PULMONET_REGISTRY_USERNAME }}
           registryPassword: ${{ secrets.PULMONET_REGISTRY_PASSWORD }}
+          environmentVariables: |
+            AZURE_STORAGE_CONNECTION_STRING=${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+            MODAL_STREAM_ENDPOINT=${{ secrets.MODAL_STREAM_ENDPOINT }}
+            PLUMONET_SHARED_SECRET=${{ secrets.PLUMONET_SHARED_SECRET }}

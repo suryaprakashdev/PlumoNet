@@ -6,9 +6,9 @@ no 2D slice extraction. A **3D U-Net** segments candidate nodules, a
 **3D ResNet-10** classifies each one as benign or malignant, and **3D Grad-CAM**
 gives volumetric heatmaps for interpretability.
 
-The trained models are deployed via **BentoML on Azure ML**, with the dataset
-and checkpoints pulled directly from **Azure Blob Storage** rather than a local
-copy of the data.
+The trained models are served via a **Modal GPU streaming endpoint** fronted by
+an **Azure Container App**, with the dataset and checkpoints pulled directly
+from **Azure Blob Storage** rather than a local copy of the data.
 
 ---
 
@@ -30,11 +30,12 @@ Stage 2    Stage 3
    └────┬────┘
         ▼
 Stage 4 — 3D Inference
-Sliding window seg → candidates → classify → aggregate → Grad-CAM
+Sliding window seg → candidates → classify → aggregate → render MPR slices
         │
         ▼
 Stage 5 — Serving
-BentoML bento → Azure ML managed endpoint
+Browser → Azure Container App (chunked upload) → Modal GPU streaming endpoint
+          (SSE progress) → browser
 ```
 
 ## Project structure
@@ -49,8 +50,10 @@ lung_cancer_project/
 ├── train_classifier.py      # Stage 3: ResNet-10 training loop
 ├── evaluation.py            # FROC, AUC, Dice, ECE on the held-out test set
 ├── inference_3d.py          # Stage 4: full 3D inference pipeline
-├── service.py                # BentoML service definition (Stage 5)
-├── requirements.txt
+├── modal_inference.py       # Stage 5: Modal GPU streaming (SSE) inference endpoint
+├── service_azure.py         # Azure Container App: chunked upload + streaming proxy to Modal
+├── frontend/app.js          # Browser UI — upload, real-time progress, MPR viewer
+├── requirements.txt          # training/eval environment only (not used for serving)
 └── README.md
 ```
 
@@ -173,23 +176,44 @@ axial/coronal/sagittal PNG overlays.
 
 ---
 
-## Deployment: BentoML on Azure ML
+## Deployment: Azure Container App + Modal GPU streaming endpoint
 
-The calibrated ResNet-10 + U-Net pair is packaged as a BentoML service
-(`service.py`) and deployed as an Azure ML managed online endpoint:
+The calibrated ResNet-10 + U-Net pair (exported to ONNX via `export_onnx.py`)
+is served from a Modal GPU function (`modal_inference.py`) using Modal's
+"Pattern 5" streaming-endpoint design: the browser uploads a DICOM zip in
+chunks to an Azure Container App (`service_azure.py`), which proxies a
+streaming HTTP request to Modal and relays live Server-Sent-Events progress
+(download → preprocessing → segmentation → per-candidate classification →
+per-plane rendering → final result) straight back to the browser. The browser
+never talks to Modal directly — `service_azure.py` is the only public ingress,
+and Modal's endpoint is gated by a shared-secret header.
+
+Deploys are automated via GitHub Actions on push to `main`:
+
+- `.github/workflows/deploy.yml` — builds the root `Dockerfile`
+  (`service_azure.py`, no ML dependencies) and deploys it to the `pulmonet`
+  Azure Container App in resource group `lidc-rg`.
+- `.github/workflows/deploy-modal.yml` — runs `modal deploy modal_inference.py`
+  whenever the GPU pipeline code, model weights, or Modal requirements change.
+
+One-time setup (not automated, done once via the Modal CLI/dashboard):
 
 ```bash
-bentoml build
-bentoml containerize lung_nodule_service:latest
-
-az ml online-endpoint create -f endpoint.yml
-az ml online-deployment create -f deployment.yml --all-traffic
+modal secret create azure-connection-string AZURE_STORAGE_CONNECTION_STRING="..."
+modal secret create plumonet-shared-secret PLUMONET_SHARED_SECRET="<random-token>"
 ```
 
-The deployment config points the model and checkpoint paths at the same Blob
-Storage containers used for training data, so there's a single source of
-truth between training and serving. Update `endpoint.yml` / `deployment.yml`
-with your workspace, resource group, and compute SKU.
+The same `PLUMONET_SHARED_SECRET` value, plus the `MODAL_STREAM_ENDPOINT` URL
+printed by `modal deploy`, must also be set as environment variables on the
+Azure Container App (see `.env.example`).
+
+**Known limitation:** `service_azure.py`'s chunked-upload session state
+(`upload_sessions`) is an in-memory dict, which only works correctly if the
+Container App runs exactly one replica. There's no shared session store or
+sticky routing configured today — if the app is ever scaled to more than one
+replica, concurrent uploads could intermittently fail. Fix (if/when needed):
+move session state to a shared store (e.g. Azure Blob metadata or a small
+Table Storage/Redis-backed map) or configure session affinity.
 
 ---
 

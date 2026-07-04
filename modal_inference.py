@@ -1,29 +1,45 @@
 """
-PlumoNet Modal GPU Inference — REAL pipeline (ported from service.py)
-=====================================================================
+PlumoNet Modal GPU Inference — Pattern 5 (GPU Streaming Endpoint)
+==================================================================
 
-Runs the actual 3D U-Net segmentation + 3D ResNet-10 classification on GPU
-and renders real annotated MPR slices (base64 PNGs) in the exact shape the
-frontend expects: candidate_views[plane][slice_idx] = {"image": <b64>, "nodules": [...]}.
+Hosts the 3D U-Net segmentation + 3D ResNet-10 classification pipeline as a
+single Modal-hosted HTTPS endpoint that streams progress via Server-Sent
+Events (SSE) while it runs, instead of blocking until the whole ~2-3 minute
+inference finishes.
 
-This replaces the placeholder. The render/slice logic here is a direct port of
-the `predict` method + `generate_annotated_slice` from service.py.
+Warm loading: `InferencePipeline3D` is constructed once inside `web_app()`
+(the `@modal.asgi_app()` factory), which Modal calls once per container boot,
+not once per request — so a container that serves back-to-back requests
+within `scaledown_window` of each other reuses the already-loaded ONNX
+sessions instead of reloading them every time.
+
+Access control: this endpoint is a public HTTPS URL once deployed. It is
+called ONLY by service_azure.py (server-to-server), never by the browser
+directly, and is gated by a shared-secret header checked before any GPU work
+starts (see `_check_auth`). CORS is intentionally not configured here since
+the caller is a server, not a browser — CORS provides no protection against
+a direct curl/script call, only the shared secret does.
+
+One-time setup before deploying:
+    modal secret create azure-connection-string AZURE_STORAGE_CONNECTION_STRING="..."
+    modal secret create plumonet-shared-secret PLUMONET_SHARED_SECRET="<random-token>"
+    # Set the same PLUMONET_SHARED_SECRET value as an env var on the Azure
+    # Container App (service_azure.py reads it to sign its request to Modal).
 
 Deploy with:
-    modal deploy modal_inference.py
-
-Ships into the image:
-  - inference_3d.py, unet3d.py, resnet3d.py   (model + pipeline code)
-  - checkpoints/unet3d.onnx, checkpoints/resnet3d.onnx  (weights)
-Run `modal deploy` from the repo root so these relative paths resolve.
+    modal deploy modal_inference.py   # run from repo root — add_local_file
+                                       # paths below are relative to it.
 """
 
-import os
-import io
+import asyncio
 import base64
+import os
+import queue as queue_mod
 import shutil
 import tempfile
-from typing import Dict, Any, List
+import threading
+import time
+from typing import Any, Dict, List
 
 import modal
 
@@ -33,43 +49,35 @@ app = modal.App("plumonet-inference")
 
 # ─── GPU Image ─────────────────────────────────────────────────────────────
 # Notes:
+#  - Base image: plain debian_slim + `pip install onnxruntime-gpu` does NOT
+#    include the CUDA runtime libraries onnxruntime-gpu needs at import time
+#    (libcublasLt.so.11 etc.) — CUDAExecutionProvider then fails to load and
+#    onnxruntime silently falls back to CPUExecutionProvider, so inference
+#    runs on CPU despite the A100 being attached. Using an official NVIDIA
+#    CUDA runtime image (matching onnxruntime-gpu==1.17.1's CUDA 11.8/cuDNN 8
+#    build) ships those libraries so the CUDA EP actually loads.
 #  - apt: libgl1/libglib2.0-0 satisfy transitive OpenGL deps (monai/skimage/mpl).
-#    opencv-python-headless itself doesn't need libGL, but keeping these avoids
-#    the whole class of "libGL.so.1: cannot open shared object file" crashes.
-#  - We install onnxruntime-GPU explicitly and drop the CPU onnxruntime so the
-#    CUDAExecutionProvider is actually available on the A10 (otherwise inference
-#    silently runs on CPU even with a GPU attached).
 #  - Model code + ONNX weights are baked into the image via add_local_*.
 
 image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.from_registry(
+        "nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04", add_python="3.11"
+    )
     .apt_install("libgl1", "libglib2.0-0")
     .pip_install_from_requirements("requirements_modal.txt")
-    # Swap CPU onnxruntime (from requirements) for the GPU build:
     .pip_install("onnxruntime-gpu==1.17.1")
-    # Ship pipeline + model source files:
     .add_local_file("inference_3d.py", "/root/inference_3d.py")
     .add_local_file("unet3d.py", "/root/unet3d.py")
     .add_local_file("resnet3d.py", "/root/resnet3d.py")
-    # Ship ONNX weights:
     .add_local_file("checkpoints/unet3d.onnx", "/root/checkpoints/unet3d.onnx")
     .add_local_file("checkpoints/resnet3d.onnx", "/root/checkpoints/resnet3d.onnx")
 )
 
-# ─── Render helper (ported verbatim from service.py) ───────────────────────
+# ─── Helpers (ported from the previous sync implementation) ────────────────
 
-# def get_cached_pipeline():
-#     """Lazy-load pipeline once and reuse it."""
-#     global _pipeline_cache
-#     if _pipeline_cache is None:
-#         print("[Cache] Loading InferencePipeline3D (first time only)...")
-#         from inference_3d import InferencePipeline3D
-#         _pipeline_cache = InferencePipeline3D(
-#             unet_onnx_path="/root/checkpoints/unet3d.onnx",
-#             resnet_onnx_path="/root/checkpoints/resnet3d.onnx",
-#         )
-#         print("[Cache] ✓ Pipeline cached in GPU memory")
-#     return _pipeline_cache
+_SENTINEL = object()
+
+
 def generate_annotated_slice(arr2d, mask2d=None, candidates=None, vmin=-1000, vmax=400):
     """
     Render a 2D HU slice with OpenCV: HU windowing -> 8-bit -> light smoothing,
@@ -79,15 +87,11 @@ def generate_annotated_slice(arr2d, mask2d=None, candidates=None, vmin=-1000, vm
     import numpy as np
     import cv2
 
-    # 1. HU windowing to 8-bit
     normed = np.clip((arr2d.astype(np.float32) - vmin) / (vmax - vmin), 0, 1)
     img_8u = (normed * 255).astype(np.uint8)
-
-    # 2. Light anti-aliasing
     img_smooth = cv2.GaussianBlur(img_8u, (3, 3), 0)
     img_bgr = cv2.cvtColor(img_smooth, cv2.COLOR_GRAY2BGR)
 
-    # 3. Markers for malignant candidates only
     RED = (0, 0, 255)  # BGR
     for cand in (candidates or []):
         if cand["probability"] < 0.5:
@@ -115,165 +119,246 @@ def find_dicom_root(base_dir: str) -> str:
     return base_dir
 
 
-# ─── GPU Inference Function ────────────────────────────────────────────────
+def _run_pipeline_sync(pipeline, dicom_root: str, event_queue: "queue_mod.Queue"):
+    """
+    Runs on a background thread: drains pipeline.run_volume_streaming()'s sync
+    generator and pushes each event onto a queue the async SSE handler drains.
+    This is the bridge that lets a synchronous, GPU-bound pipeline report
+    progress to an async endpoint without needing any cross-process streaming
+    API — everything here happens inside one container/process.
+    """
+    try:
+        for event in pipeline.run_volume_streaming(
+            dicom_root, aggregation="top_k", k=5, min_malignancy_prob=0.0
+        ):
+            event_queue.put(event)
+    except Exception as exc:
+        event_queue.put({"stage": "error", "message": str(exc)})
+    finally:
+        event_queue.put(_SENTINEL)
+
+
+def _sse(payload: Dict[str, Any]) -> bytes:
+    import json
+    return f"data: {json.dumps(payload)}\n\n".encode()
+
+
+# ─── Streaming GPU Endpoint ─────────────────────────────────────────────
 
 
 @app.function(
     image=image,
     gpu="a100",
-    secrets=[modal.Secret.from_name("azure-connection-string")],
+    secrets=[
+        modal.Secret.from_name("azure-connection-string"),
+        modal.Secret.from_name("plumonet-shared-secret"),
+    ],
     timeout=600,
+    min_containers=0,       # true scale-to-zero — traffic is low/sporadic
+    max_containers=3,       # cost/blast-radius safety rail, not a throughput target
+    scaledown_window=300,   # keep a container warm 5 min after its last request
+                            # so back-to-back scans reuse the already-loaded model
 )
-def run_inference(blob_name: str) -> Dict[str, Any]:
-    """Download DICOM zip from Azure, run seg+cls, render MPR slices, return payload."""
-    import numpy as np  # noqa: F401  (used by helpers)
+@modal.asgi_app()
+def web_app():
+    """
+    Called once per container boot. Loading InferencePipeline3D here (not
+    inside the route handler) is what makes this warm: the container reuses
+    this same pipeline instance for every request it serves until Modal
+    reclaims it after `scaledown_window` seconds of idling.
+    """
+    from fastapi import FastAPI, Request
+    from fastapi.responses import StreamingResponse
     from azure.storage.blob import BlobServiceClient
 
-    print(f"[Modal GPU] Starting inference for: {blob_name}")
-
-    # ── Azure connection string from Modal secret ──────────────────────────
-    connection_string = (
-        os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
-        or os.environ.get("MODAL_AZURE_STORAGE_CONNECTION_STRING")
-    )
-    if not connection_string:
-        available = [k for k in os.environ if 'AZURE' in k or 'STORAGE' in k]
-        print(f"[Modal GPU] Available Azure vars: {available}")
-        raise ValueError(
-            "AZURE_STORAGE_CONNECTION_STRING not found. Check the "
-            "'azure-connection-string' secret in the Modal dashboard."
-        )
-
-    container = "dicom-uploads"
-    bsc = BlobServiceClient.from_connection_string(connection_string)
-
-    # ── Load pipeline (ONNX weights baked into image at /root/checkpoints) ──
     from inference_3d import InferencePipeline3D
 
+    print("[Cache] Loading InferencePipeline3D (container boot)...")
     pipeline = InferencePipeline3D(
         unet_onnx_path="/root/checkpoints/unet3d.onnx",
         resnet_onnx_path="/root/checkpoints/resnet3d.onnx",
     )
+    print("[Cache] Pipeline loaded — reused for every request on this container.")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # ── Download + unzip ───────────────────────────────────────────────
-        zip_path = os.path.join(tmpdir, "upload.zip")
-        blob_client = bsc.get_blob_client(container=container, blob=blob_name)
-        print(f"[Modal GPU] Downloading blob: {blob_name}")
+    api = FastAPI(title="PlumoNet GPU Inference (streaming)")
 
-        downloader = blob_client.download_blob()
-        data = downloader.readall()
-        with open(zip_path, "wb") as f:
-            f.write(data)
+    def _check_auth(request: Request) -> bool:
+        expected = os.environ.get("PLUMONET_SHARED_SECRET")
+        provided = request.headers.get("x-plumonet-secret")
+        return bool(expected) and provided == expected
 
-        size = os.path.getsize(zip_path)
-        head = data[:8]
-        print(f"[Modal GPU] Downloaded {size} bytes ✓  first-bytes={head!r}")
+    @api.post("/stream")
+    async def stream(request: Request):
+        if not _check_auth(request):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-        # Zip magic is b'PK\x03\x04' (or PK\x05\x06 empty / PK\x07\x08 spanned)
-        if not data.startswith(b"PK"):
-            raise ValueError(
-                f"Downloaded blob is not a ZIP. size={size}, "
-                f"first bytes={head!r}. The upload likely stored the wrong content."
-            )
+        body = await request.json()
+        blob_name = body.get("blob_name")
+        if not blob_name:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "blob_name required"}, status_code=400)
 
-        shutil.unpack_archive(zip_path, tmpdir, format="zip")
-        dicom_root = find_dicom_root(tmpdir)
-
-        # pipeline = get_cached_pipeline()
-
-        # ── Segmentation + classification ──────────────────────────────────
-        result = pipeline.run_volume(
-            dicom_root,
-            aggregation="top_k",
-            k=5,
-            min_malignancy_prob=0.0,
+        return StreamingResponse(
+            _event_stream(blob_name, pipeline),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-        seg_mask = getattr(result, "segmentation_mask", None)  # (D,H,W) or None
-        candidates = result.candidates
-        vol = result.volume_iso
+    async def _event_stream(blob_name: str, pipeline):
+        print(f"[Modal GPU] Starting streaming inference for: {blob_name}")
+        try:
+            connection_string = (
+                os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+                or os.environ.get("MODAL_AZURE_STORAGE_CONNECTION_STRING")
+            )
+            if not connection_string:
+                yield _sse({"stage": "error", "message": "AZURE_STORAGE_CONNECTION_STRING not found"})
+                return
 
-        patient_score = max((c.probability for c in candidates), default=0.0)
-        patient_prediction = "Malignant" if patient_score >= 0.5 else "Benign"
+            container = "dicom-uploads"
+            bsc = BlobServiceClient.from_connection_string(connection_string)
 
-        # ── Per-slice candidate lookup (ported from service.py) ────────────
-        def get_candidates_in_slice(plane: str, idx: int) -> List[dict]:
-            in_slice = []
-            for c in candidates:
-                (z0, z1), (y0, y1), (x0, x1) = c.bbox
-                if plane == "axial" and z0 <= idx <= z1:
-                    in_slice.append({
-                        "candidate_index": int(c.candidate_index),
-                        "probability": float(c.probability),
-                        "center_2d": (int(c.centroid[1]), int(c.centroid[2])),
-                    })
-                elif plane == "coronal" and y0 <= idx <= y1:
-                    in_slice.append({
-                        "candidate_index": int(c.candidate_index),
-                        "probability": float(c.probability),
-                        "center_2d": (int(c.centroid[0]), int(c.centroid[2])),
-                    })
-                elif plane == "sagittal" and x0 <= idx <= x1:
-                    in_slice.append({
-                        "candidate_index": int(c.candidate_index),
-                        "probability": float(c.probability),
-                        "center_2d": (int(c.centroid[0]), int(c.centroid[1])),
-                    })
-            return in_slice
+            with tempfile.TemporaryDirectory() as tmpdir:
+                zip_path = os.path.join(tmpdir, "upload.zip")
+                blob_client = bsc.get_blob_client(container=container, blob=blob_name)
 
-        candidate_views: Dict[str, Dict[str, Any]] = {
-            "axial": {}, "coronal": {}, "sagittal": {}
-        }
+                t0 = time.perf_counter()
+                data = await asyncio.to_thread(
+                    lambda: blob_client.download_blob().readall()
+                )
+                print(f"[Timing] download: {time.perf_counter() - t0:.1f}s ({len(data)} bytes)")
+                if not data.startswith(b"PK"):
+                    yield _sse({"stage": "error", "message": "downloaded blob is not a ZIP"})
+                    return
+                with open(zip_path, "wb") as f:
+                    f.write(data)
+                yield _sse({"stage": "downloaded", "bytes": len(data)})
 
-        for z in result.active_slices["axial"]:
-            cands = get_candidates_in_slice("axial", z)
-            img = generate_annotated_slice(
-                vol[z, :, :], seg_mask[z, :, :] if seg_mask is not None else None, cands)
-            candidate_views["axial"][str(z)] = {"image": img, "nodules": cands}
+                t0 = time.perf_counter()
+                await asyncio.to_thread(shutil.unpack_archive, zip_path, tmpdir, "zip")
+                dicom_root = find_dicom_root(tmpdir)
+                print(f"[Timing] unzip+find_root: {time.perf_counter() - t0:.1f}s")
 
-        for y in result.active_slices["coronal"]:
-            cands = get_candidates_in_slice("coronal", y)
-            img = generate_annotated_slice(
-                vol[:, y, :], seg_mask[:, y, :] if seg_mask is not None else None, cands)
-            candidate_views["coronal"][str(y)] = {"image": img, "nodules": cands}
+                # ── Run the pipeline on a background thread, draining its
+                #    progress events onto the event loop as they arrive ──
+                t0 = time.perf_counter()
+                event_queue: "queue_mod.Queue" = queue_mod.Queue()
+                threading.Thread(
+                    target=_run_pipeline_sync,
+                    args=(pipeline, dicom_root, event_queue),
+                    daemon=True,
+                ).start()
 
-        for x in result.active_slices["sagittal"]:
-            cands = get_candidates_in_slice("sagittal", x)
-            img = generate_annotated_slice(
-                vol[:, :, x], seg_mask[:, :, x] if seg_mask is not None else None, cands)
-            candidate_views["sagittal"][str(x)] = {"image": img, "nodules": cands}
+                result = None
+                while True:
+                    event = await asyncio.to_thread(event_queue.get)
+                    if event is _SENTINEL:
+                        break
+                    if event.get("stage") == "result":
+                        result = event["result"]
+                        continue
+                    if event.get("stage") == "error":
+                        yield _sse(event)
+                        return
+                    yield _sse(event)
+                print(f"[Timing] pipeline (wall, incl. thread handoff): {time.perf_counter() - t0:.1f}s")
 
-    # ── Response (matches service.py + frontend contract) ──────────────────
-    payload = {
-        "patient_score": float(patient_score),
-        "prediction": str(patient_prediction),
-        "num_candidates": int(len(candidates)),
-        "top_candidates": [
-            {
-                "centroid": [int(v) for v in c.centroid],
-                "prob": float(c.probability),
-                "prediction": str(c.prediction),
-                "volume_voxels": int(c.volume_voxels),
-                "candidate_index": int(c.candidate_index),
-            }
-            for c in candidates
-        ],
-        "candidate_views": candidate_views,
-        "metadata": {
-            "patient_id": str(result.metadata.get("patient_id", "")),
-            "volume_shape": [int(v) for v in result.metadata.get("volume_shape", [])],
-            "total_time_s": round(float(result.total_time_ms) / 1000, 1),
-            "seg_time_s": round(float(result.seg_time_ms) / 1000, 1),
-            "cls_time_s": round(float(result.cls_time_ms) / 1000, 1),
-        },
-    }
+                if result is None:
+                    yield _sse({"stage": "error", "message": "pipeline ended without a result"})
+                    return
 
-    print(f"[Modal GPU] Inference complete ✓  prediction={payload['prediction']} "
-          f"candidates={payload['num_candidates']}")
-    return payload
+                # ── Build the response payload, streaming render progress ──
+                seg_mask = getattr(result, "segmentation_mask", None)
+                candidates = result.candidates
+                vol = result.volume_iso
+
+                patient_score = max((c.probability for c in candidates), default=0.0)
+                patient_prediction = "Malignant" if patient_score >= 0.5 else "Benign"
+
+                def get_candidates_in_slice(plane: str, idx: int) -> List[dict]:
+                    in_slice = []
+                    for c in candidates:
+                        (z0, z1), (y0, y1), (x0, x1) = c.bbox
+                        if plane == "axial" and z0 <= idx <= z1:
+                            in_slice.append({
+                                "candidate_index": int(c.candidate_index),
+                                "probability": float(c.probability),
+                                "center_2d": (int(c.centroid[1]), int(c.centroid[2])),
+                            })
+                        elif plane == "coronal" and y0 <= idx <= y1:
+                            in_slice.append({
+                                "candidate_index": int(c.candidate_index),
+                                "probability": float(c.probability),
+                                "center_2d": (int(c.centroid[0]), int(c.centroid[2])),
+                            })
+                        elif plane == "sagittal" and x0 <= idx <= x1:
+                            in_slice.append({
+                                "candidate_index": int(c.candidate_index),
+                                "probability": float(c.probability),
+                                "center_2d": (int(c.centroid[0]), int(c.centroid[1])),
+                            })
+                    return in_slice
+
+                def render_plane(plane: str):
+                    views = {}
+                    for idx in result.active_slices[plane]:
+                        cands = get_candidates_in_slice(plane, idx)
+                        if plane == "axial":
+                            arr, m = vol[idx, :, :], seg_mask[idx, :, :] if seg_mask is not None else None
+                        elif plane == "coronal":
+                            arr, m = vol[:, idx, :], seg_mask[:, idx, :] if seg_mask is not None else None
+                        else:
+                            arr, m = vol[:, :, idx], seg_mask[:, :, idx] if seg_mask is not None else None
+                        views[str(idx)] = {"image": generate_annotated_slice(arr, m, cands), "nodules": cands}
+                    return views
+
+                candidate_views: Dict[str, Dict[str, Any]] = {}
+                planes = ["axial", "coronal", "sagittal"]
+                t0 = time.perf_counter()
+                for i, plane in enumerate(planes):
+                    n_slices = len(result.active_slices[plane])
+                    t_plane = time.perf_counter()
+                    candidate_views[plane] = await asyncio.to_thread(render_plane, plane)
+                    print(f"[Timing] render {plane}: {time.perf_counter() - t_plane:.1f}s ({n_slices} slices)")
+                    yield _sse({"stage": "rendering", "current": i + 1, "total": len(planes)})
+                print(f"[Timing] rendering total: {time.perf_counter() - t0:.1f}s")
+
+                payload = {
+                    "patient_score": float(patient_score),
+                    "prediction": str(patient_prediction),
+                    "num_candidates": int(len(candidates)),
+                    "top_candidates": [
+                        {
+                            "centroid": [int(v) for v in c.centroid],
+                            "prob": float(c.probability),
+                            "prediction": str(c.prediction),
+                            "volume_voxels": int(c.volume_voxels),
+                            "candidate_index": int(c.candidate_index),
+                        }
+                        for c in candidates
+                    ],
+                    "candidate_views": candidate_views,
+                    "metadata": {
+                        "patient_id": str(result.metadata.get("patient_id", "")),
+                        "study_date": str(result.metadata.get("study_date", "")),
+                        "series_uid": str(result.metadata.get("series_uid", "")),
+                        "volume_shape": [int(v) for v in result.metadata.get("volume_shape", [])],
+                        "total_time_s": round(float(result.total_time_ms) / 1000, 1),
+                        "seg_time_s": round(float(result.seg_time_ms) / 1000, 1),
+                        "cls_time_s": round(float(result.cls_time_ms) / 1000, 1),
+                    },
+                }
+                print(f"[Modal GPU] Inference complete ✓  prediction={payload['prediction']} "
+                      f"candidates={payload['num_candidates']}")
+                yield _sse({"stage": "done", "result": payload})
+
+        except Exception as exc:
+            print(f"[Modal GPU] ERROR: {exc}")
+            yield _sse({"stage": "error", "message": str(exc)})
+
+    return api
 
 
 if __name__ == "__main__":
     print("Deploy with:  modal deploy modal_inference.py  (run from repo root)")
-
