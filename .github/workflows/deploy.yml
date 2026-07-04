@@ -43,7 +43,7 @@ jobs:
           registryUrl: ${{ secrets.PULMONET_REGISTRY_URL }}
           registryUsername: ${{ secrets.PULMONET_REGISTRY_USERNAME }}
           registryPassword: ${{ secrets.PULMONET_REGISTRY_PASSWORD }}
-          environmentVariables: |
-            AZURE_STORAGE_CONNECTION_STRING=${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
-            MODAL_STREAM_ENDPOINT=${{ secrets.MODAL_STREAM_ENDPOINT }}
-            PLUMONET_SHARED_SECRET=${{ secrets.PLUMONET_SHARED_SECRET }}
+          # NOTE: this action expects SPACE-separated key=value pairs on one line,
+          # not a newline-separated block — a newline-separated block gets treated
+          # as one giant value for the first key instead of three separate vars.
+          environmentVariables: AZURE_STORAGE_CONNECTION_STRING=${{ secrets.AZURE_STORAGE_CONNECTION_STRING }} MODAL_STREAM_ENDPOINT=${{ secrets.MODAL_STREAM_ENDPOINT }} PLUMONET_SHARED_SECRET=${{ secrets.PLUMONET_SHARED_SECRET }}
