@@ -304,6 +304,14 @@ async def finalize_upload(request) -> JSONResponse:
         return JSONResponse({"error": f"Upload finalization failed: {e}"}, status_code=500)
 
 
+async def healthz(request) -> JSONResponse:
+    """GET /healthz — required by the Azure Container App's liveness/readiness
+    probes (configured to check this exact path on port 3000); without it the
+    probes 404 forever and the revision never goes Ready, no matter how many
+    times you deploy."""
+    return JSONResponse({"status": "ok"})
+
+
 async def predict(request) -> StreamingResponse:
     """POST /api/predict — stream Modal inference progress for a committed blob."""
     body = await request.json()
@@ -322,6 +330,7 @@ async def predict(request) -> StreamingResponse:
 # ─── App Setup ────────────────────────────────────────────────────────────
 
 routes = [
+    Route("/healthz", healthz, methods=["GET"]),
     Route("/api/upload/initiate", initiate_upload, methods=["POST", "OPTIONS"]),
     Route("/api/upload/chunk", upload_chunk, methods=["POST", "OPTIONS"]),
     Route("/api/upload/finalize", finalize_upload, methods=["POST", "OPTIONS"]),
