@@ -1,0 +1,39 @@
+name: Deploy Modal GPU inference
+
+on:
+  push:
+    branches: [production/deployment]
+    paths:
+      - "modal_inference.py"
+      - "inference_3d.py"
+      - "unet3d.py"
+      - "resnet3d.py"
+      - "checkpoints/unet3d.onnx"
+      - "checkpoints/resnet3d.onnx"
+      - "requirements_modal.txt"
+  workflow_dispatch:
+
+jobs:
+  deploy-modal:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Modal CLI
+        # modal_inference.py uses min_containers/max_containers/scaledown_window,
+        # which are post-1.0 parameter names (renamed from keep_warm/concurrency_limit/
+        # container_idle_timeout) — pin to a 1.x version, not the pre-1.0 line.
+        run: pip install "modal>=1.5,<2"
+
+      - name: Deploy to Modal
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: modal deploy modal_inference.py

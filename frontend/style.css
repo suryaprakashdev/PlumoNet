@@ -99,33 +99,6 @@ body {
     gap: 12px;
 }
 
-.status-pill {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: var(--surface2);
-    border-radius: 4px;
-    padding: 4px 10px;
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--muted);
-    border: 1px solid var(--border);
-}
-
-.status-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--green);
-}
-
-.progress-bar {
-    height: 2px;
-    background: var(--blue);
-    width: 0%;
-    transition: width .3s;
-}
-
 /* ─── PATIENT BANNER ────────────────────────── */
 .patient-banner {
     display: none;
@@ -141,34 +114,6 @@ body {
     align-items: center;
     gap: 28px;
     flex-wrap: wrap;
-}
-
-.patient-avatar {
-    width: 38px;
-    height: 38px;
-    border-radius: 50%;
-    background: #dbeafe;
-    border: 1.5px solid #bfdbfe;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 700;
-    color: var(--blue);
-    font-size: 14px;
-    flex-shrink: 0;
-}
-
-.patient-name {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text);
-}
-
-.patient-mrn {
-    font-family: var(--mono);
-    color: var(--muted);
-    font-size: 11px;
-    margin-top: 1px;
 }
 
 .meta-col {
@@ -306,9 +251,20 @@ body {
     display: inline-block;
 }
 
-.shape-ben,
+.shape-ben {
+    width: 9px;
+    height: 9px;
+    background: var(--green);
+    border-radius: 50%;
+    display: inline-block;
+}
+
 .shape-bor {
-    display: none !important;
+    width: 9px;
+    height: 9px;
+    background: var(--amber);
+    clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+    display: inline-block;
 }
 
 .cand-bar {
@@ -619,30 +575,6 @@ body {
 .btn-sample:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-}
-
-.prog-status {
-    margin-top: 20px;
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--blue);
-    display: none;
-    min-height: 16px;
-}
-
-.prog-track {
-    margin-top: 10px;
-    height: 2px;
-    background: var(--border2);
-    border-radius: 1px;
-}
-
-.prog-fill {
-    height: 100%;
-    background: var(--blue);
-    border-radius: 1px;
-    width: 0%;
-    transition: width .4s;
 }
 
 /* ─── ERROR TOAST ─────────────────────────── */

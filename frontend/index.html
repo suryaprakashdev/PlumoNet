@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PulmoScan AI — Diagnostic Dashboard</title>
+    <title>PulmoNet — Diagnostic Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -28,40 +28,31 @@
                     <path d="M12 2C8 2 5 5 5 8c0 2 1 4 2 5l-2 7h14l-2-7c1-1 2-3 2-5 0-3-3-6-7-6zm-3 9c-1 0-2-1-2-2s1-2 2-2 2 1 2 2-1 2-2 2zm6 0c-1 0-2-1-2-2s1-2 2-2 2 1 2 2-1 2-2 2z" />
                 </svg>
             </div>
-            <span class="brand-name">PulmoScan AI <span class="brand-sub">Diagnostic Dashboard</span></span>
+            <span class="brand-name">PulmoNet <span class="brand-sub">Diagnostic Dashboard</span></span>
         </div>
         <div class="header-right">
-            <div class="status-pill">
-                <div class="status-dot"></div>
-                <span id="api-status">BentoML Connected</span>
-            </div>
             <div id="hdr-clock" style="font-family:var(--mono);font-size:11px;color:var(--muted)"></div>
         </div>
     </header>
 
-    <!-- PATIENT BANNER (hidden until result) -->
+    <!-- STUDY BANNER (hidden until result) — real DICOM metadata only, no fabricated identity -->
     <div class="patient-banner" id="patient-banner">
         <div class="patient-row">
-            <div class="patient-avatar" id="pat-initials">--</div>
-            <div>
-                <div class="patient-name" id="pat-name">—</div>
-                <div class="patient-mrn" id="pat-mrn">—</div>
-            </div>
             <div class="meta-col">
-                <div class="meta-label">DOB (Age)</div>
-                <div class="meta-val"><span id="pat-dob">—</span> (<span id="pat-age">—</span>)</div>
+                <div class="meta-label">Patient ID</div>
+                <div class="meta-val" style="font-family:var(--mono)" id="pat-id">—</div>
             </div>
             <div class="meta-col">
                 <div class="meta-label">Study Date</div>
                 <div class="meta-val" id="pat-date">—</div>
             </div>
             <div class="meta-col">
-                <div class="meta-label">Ref. Physician</div>
-                <div class="meta-val" id="pat-physician">—</div>
-            </div>
-            <div class="meta-col">
                 <div class="meta-label">Series UID</div>
                 <div class="meta-val" style="font-family:var(--mono);font-size:10px" id="pat-series">—</div>
+            </div>
+            <div class="meta-col">
+                <div class="meta-label">Volume</div>
+                <div class="meta-val" id="pat-volume">—</div>
             </div>
             <div class="verdict-pill" id="pat-verdict" style="display:none"></div>
         </div>
@@ -128,7 +119,6 @@
                         <div class="stage-dot" id="stage-3"><div class="stage-pip"></div><div class="stage-lbl">Render</div></div>
                     </div>
                 </div>
-                <div id="prog-track" style="display:none"><div></div></div>
             </div>
         </div>
 

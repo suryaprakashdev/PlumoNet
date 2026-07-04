@@ -2,7 +2,7 @@ name: Build and deploy PlumoNet to Azure Container Apps
 
 on:
   push:
-    branches: [main]
+    branches: [production/deployment]
   workflow_dispatch:
 
 jobs:
@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write  # required for OIDC federated login (azure/login@v2)
 
     steps:
       - uses: actions/checkout@v4
@@ -17,7 +18,9 @@ jobs:
       - name: Azure Login
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ secrets.PULMONET_AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.PULMONET_AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.PULMONET_AZURE_SUBSCRIPTION_ID }}
 
       - name: Log in to ACR
         uses: docker/login-action@v3
@@ -40,3 +43,7 @@ jobs:
           registryUrl: ${{ secrets.PULMONET_REGISTRY_URL }}
           registryUsername: ${{ secrets.PULMONET_REGISTRY_USERNAME }}
           registryPassword: ${{ secrets.PULMONET_REGISTRY_PASSWORD }}
+          # NOTE: this action expects SPACE-separated key=value pairs on one line,
+          # not a newline-separated block — a newline-separated block gets treated
+          # as one giant value for the first key instead of three separate vars.
+          environmentVariables: AZURE_STORAGE_CONNECTION_STRING=${{ secrets.AZURE_STORAGE_CONNECTION_STRING }} MODAL_STREAM_ENDPOINT=${{ secrets.MODAL_STREAM_ENDPOINT }} PLUMONET_SHARED_SECRET=${{ secrets.PLUMONET_SHARED_SECRET }}

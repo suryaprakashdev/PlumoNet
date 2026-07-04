@@ -25,13 +25,13 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
-from scipy.ndimage import label as scipy_label
-from scipy.ndimage import zoom
+import cc3d
+from scipy.ndimage import find_objects, zoom
 
 from monai.inferers import SlidingWindowInferer
 from monai.transforms import (
@@ -317,7 +317,7 @@ class InferencePipeline3D:
         # MONAI SlidingWindowInferer for full-volume segmentation
         self.inferer = SlidingWindowInferer(
             roi_size=(CROP_SIZE, CROP_SIZE, CROP_SIZE),
-            sw_batch_size=4,
+            sw_batch_size=8,
             overlap=0.25,
             mode="gaussian",
             progress=True,
@@ -453,6 +453,113 @@ class InferencePipeline3D:
         )
         return result
 
+    def run_volume_streaming(
+        self,
+        folder_path: str,
+        aggregation: str = "top_k",
+        k: int = 5,
+        classification_threshold: float = 0.5,
+        min_malignancy_prob: float = 0.0,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Generator variant of run_volume() for callers that want live progress
+        (e.g. the Modal SSE streaming endpoint). Yields small JSON-serializable
+        progress dicts as each stage runs, then a final
+        {"stage": "result", "result": VolumeResult3D} event.
+
+        run_volume() is untouched and remains the entry point for the CLI and
+        run_batch() — this method exists alongside it, not as a replacement.
+        """
+        request_id = str(uuid.uuid4())
+        t0 = time.perf_counter()
+
+        logger.info("3D Inference (streaming) | request=%s | folder=%s",
+                     request_id[:8], os.path.basename(folder_path))
+
+        yield {"stage": "preprocessing", "status": "started"}
+        t_load = time.perf_counter()
+        volume, meta = load_dicom_volume(folder_path)
+        print(f"[Timing] load_dicom_volume: {time.perf_counter() - t_load:.1f}s (shape={volume.shape})")
+        patient_id = meta["patient_id"]
+        spacing = (
+            meta["slice_thickness"],
+            meta["pixel_spacing"][0],
+            meta["pixel_spacing"][1],
+        )
+        t_resample = time.perf_counter()
+        volume_iso, _scale_factors = resample_to_isotropic(volume, spacing)
+        print(f"[Timing] resample_to_isotropic: {time.perf_counter() - t_resample:.1f}s "
+              f"({volume.shape} -> {volume_iso.shape})")
+        yield {"stage": "preprocessing", "status": "done"}
+
+        yield {"stage": "segmentation", "status": "started"}
+        t_seg = time.perf_counter()
+        seg_mask = self._segment_volume(volume_iso)
+        seg_time = (time.perf_counter() - t_seg) * 1000
+        yield {"stage": "segmentation", "status": "done"}
+
+        t_extract = time.perf_counter()
+        candidates_info = self._extract_candidates(seg_mask)
+        print(f"[Timing] _extract_candidates (connected components): "
+              f"{time.perf_counter() - t_extract:.1f}s ({len(candidates_info)} candidates, mask shape={seg_mask.shape})")
+        logger.info("Found %d candidates above threshold", len(candidates_info))
+
+        t_cls = time.perf_counter()
+        candidate_results: List[CandidateResult] = []
+        for event in self._classify_candidates_streaming(
+            volume_iso, candidates_info, classification_threshold, min_malignancy_prob
+        ):
+            if event["stage"] == "classify_result":
+                candidate_results = event["results"]
+            else:
+                yield event
+        cls_time = (time.perf_counter() - t_cls) * 1000
+
+        active_slices = {"axial": set(), "coronal": set(), "sagittal": set()}
+        for cand in candidate_results:
+            (z0, z1), (y0, y1), (x0, x1) = cand.bbox
+            active_slices["axial"].update(range(z0, z1 + 1))
+            active_slices["coronal"].update(range(y0, y1 + 1))
+            active_slices["sagittal"].update(range(x0, x1 + 1))
+        active_slices = {plane: sorted(idxs) for plane, idxs in active_slices.items()}
+
+        if candidate_results:
+            probs = [c.probability for c in candidate_results]
+            patient_prob, agg_label = self._aggregate(probs, aggregation, k)
+        else:
+            patient_prob = 0.0
+            agg_label = aggregation
+
+        patient_pred = ("Malignant" if patient_prob > classification_threshold
+                        else "Benign")
+        patient_conf = self._confidence_tier(patient_prob, classification_threshold)
+        total_ms = (time.perf_counter() - t0) * 1000
+
+        result = VolumeResult3D(
+            request_id=request_id,
+            folder_path=folder_path,
+            patient_id=patient_id,
+            patient_probability=patient_prob,
+            patient_prediction=patient_pred,
+            patient_confidence=patient_conf,
+            aggregation_method=agg_label,
+            n_candidates_found=len(candidate_results),
+            segmentation_mask=seg_mask,
+            volume_iso=volume_iso,
+            candidates=candidate_results,
+            active_slices=active_slices,
+            total_time_ms=total_ms,
+            seg_time_ms=seg_time,
+            cls_time_ms=cls_time,
+            metadata=meta,
+        )
+
+        logger.info(
+            "3D Inference (streaming) complete | %s | prob=%.4f | candidates=%d | time=%.0fms",
+            patient_pred, patient_prob, len(candidate_results), total_ms
+        )
+        yield {"stage": "result", "result": result}
+
     # ── Segmentation ──────────────────────────
 
     def _segment_volume(self, volume: np.ndarray) -> np.ndarray:
@@ -521,18 +628,38 @@ class InferencePipeline3D:
         Extract 3D connected components from the segmentation mask.
 
         Returns list of dicts with 'label', 'centroid', 'volume' keys.
+
+        Uses cc3d (connected-components-3d) instead of scipy.ndimage.label for
+        the labeling pass, and scipy.ndimage.find_objects() to get each
+        component's bounding box in one O(volume) pass instead of looping
+        `labeled_array == i` / np.argwhere() over the FULL volume once per
+        component (that per-component full-volume rescan was the actual
+        bottleneck — ~24s on a ~55M-voxel mask with 140+ components — not the
+        labeling algorithm itself, which is fast either way). Restricting the
+        per-component work to its own bounding-box slice makes this ~O(volume
+        + total component voxels) instead of O(n_components * volume).
+        connectivity=6 matches scipy.ndimage.label's old default
+        (face-adjacency only), so candidate detection results are unchanged.
         """
-        labeled_array, n_features = scipy_label(mask)
+        labeled_array, n_features = cc3d.connected_components(
+            mask, connectivity=6, return_N=True
+        )
         candidates = []
 
-        for i in range(1, n_features + 1):
-            component = (labeled_array == i)
+        objects = find_objects(labeled_array, max_label=n_features)
+        for i, slices in enumerate(objects, start=1):
+            if slices is None:
+                continue  # label i has no voxels (can happen after cc3d relabeling)
+
+            sub_labels = labeled_array[slices]
+            component = (sub_labels == i)
             vol = int(component.sum())
 
             if vol < self.min_candidate_voxels:
                 continue
 
-            coords = np.argwhere(component)
+            offset = np.array([s.start for s in slices])
+            coords = np.argwhere(component) + offset
             centroid = tuple(coords.mean(axis=0).astype(int))
             z_min, y_min, x_min = coords.min(axis=0)
             z_max, y_max, x_max = coords.max(axis=0)
@@ -620,6 +747,56 @@ class InferencePipeline3D:
             r.candidate_index = i
 
         return results
+
+    def _classify_candidates_streaming(
+        self,
+        volume: np.ndarray,
+        candidates: List[Dict],
+        threshold: float,
+        min_prob: float = 0.0,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Generator twin of _classify_candidates(): same classification logic,
+        but yields {"stage": "classifying", "current": i, "total": n} after
+        each candidate, then a final {"stage": "classify_result", "results": [...]}
+        event carrying the same (sorted, re-indexed) CandidateResult list
+        _classify_candidates() would have returned.
+        """
+        results = []
+        total = len(candidates)
+
+        for idx, cand in enumerate(candidates):
+            centroid = cand["centroid"]
+            bbox = cand["bbox"]
+
+            crop = self._extract_crop(volume, centroid)
+            tensor = self._preprocess_crop(crop)
+
+            ort_inputs = {self.resnet_input_name: tensor.cpu().numpy()}
+            ort_outs = self.resnet_session.run(None, ort_inputs)
+            logit = ort_outs[0][0][0]
+            prob = 1.0 / (1.0 + np.exp(-logit))
+
+            yield {"stage": "classifying", "current": idx + 1, "total": total}
+
+            if prob < min_prob:
+                continue
+
+            prediction = "Malignant" if prob > threshold else "Benign"
+            results.append(CandidateResult(
+                candidate_index=idx,
+                centroid=centroid,
+                bbox=bbox,
+                volume_voxels=cand["volume"],
+                probability=float(prob),
+                prediction=prediction,
+            ))
+
+        results.sort(key=lambda r: r.probability, reverse=True)
+        for i, r in enumerate(results):
+            r.candidate_index = i
+
+        yield {"stage": "classify_result", "results": results}
 
     def _extract_crop(self, volume: np.ndarray,
                       center: Tuple[int, int, int]) -> np.ndarray:

@@ -1,5 +1,6 @@
 """
-Azure Frontend Service — Chunked Upload (async, ordered, verified) + Modal call
+Azure Frontend Service — Chunked Upload (async, ordered, verified) + Modal
+streaming proxy
 ===============================================================================
 
 Reworked file-transfer protocol:
@@ -15,8 +16,15 @@ Reworked file-transfer protocol:
     content-type set to application/zip.
   * Idempotent — a re-sent chunk overwrites its slot instead of duplicating.
 
+Inference call: `/api/predict` proxies a streaming HTTP request to Modal's
+Pattern-5 SSE endpoint (modal_inference.py) and relays the byte stream
+straight through to the browser — this container never talks to the Modal
+Python SDK, it's a plain httpx streaming client. The browser only ever talks
+to this service; Modal's URL and shared secret stay server-side.
+
 The HTTP contract (routes, request/response shape) is unchanged, so the
-frontend (app.js) needs no changes.
+frontend (app.js) needs no changes beyond how it *reads* the /api/predict
+response body (SSE stream instead of one JSON blob).
 """
 
 import os
@@ -29,9 +37,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import httpx
 from starlette.applications import Starlette
 from starlette.staticfiles import StaticFiles
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 from starlette.middleware.cors import CORSMiddleware
 
@@ -46,6 +55,10 @@ PORT = int(os.environ.get("PORT", 3000))
 AZURE_CONTAINER = "dicom-uploads"
 CHUNK_SIZE = 5 * 1024 * 1024
 STAGE_RETRIES = 2  # transient-failure retries per block
+
+# Modal Pattern-5 streaming endpoint (e.g. https://<workspace>--plumonet-inference-web.modal.run)
+MODAL_STREAM_ENDPOINT = os.environ.get("MODAL_STREAM_ENDPOINT", "").rstrip("/")
+PLUMONET_SHARED_SECRET = os.environ.get("PLUMONET_SHARED_SECRET", "")
 
 # In-memory upload sessions
 upload_sessions: Dict[str, Dict[str, Any]] = {}
@@ -78,34 +91,47 @@ def _block_id(chunk_index: int) -> str:
     return base64.b64encode(f"block-{chunk_index:08d}".encode()).decode()
 
 
-# ─── Modal Function Reference ──────────────────────────────────────────────
+# ─── Modal streaming proxy ──────────────────────────────────────────────────
+# A single cached httpx client (connection pooling, like the Blob client above).
 
-_run_inference = None
+_http_client: httpx.AsyncClient | None = None
 
 
-def get_modal_function():
+def get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
+    return _http_client
+
+
+async def stream_modal_inference(blob_name: str):
+    """
+    Async generator: opens a streaming POST to Modal's /stream endpoint and
+    yields raw bytes as they arrive — a byte-level relay, no SSE parsing or
+    re-encoding on this side. Yields one final `error` SSE frame itself if the
+    request to Modal can't even be made (e.g. Modal is down, misconfigured).
+    """
+    if not MODAL_STREAM_ENDPOINT:
+        yield b'data: {"stage": "error", "message": "MODAL_STREAM_ENDPOINT not configured"}\n\n'
+        return
+
+    client = get_http_client()
     try:
-        import modal
-        fn = modal.Function.from_name("plumonet-inference", "run_inference")
-        print("[Modal] ✓ Got reference to deployed run_inference function")
-        return fn
-    except Exception as e:
-        print(f"[Modal ERROR] Failed to get function reference: {e}")
-        print("[Modal] Make sure 'plumonet-inference' app is deployed!")
-        return None
-
-
-async def call_modal_inference(blob_name: str) -> Dict[str, Any]:
-    global _run_inference
-    if _run_inference is None:
-        _run_inference = get_modal_function()
-    if _run_inference is None:
-        raise Exception("Modal function not available")
-
-    print(f"[Modal] Calling run_inference('{blob_name}')")
-    result = await _run_inference.remote.aio(blob_name)
-    print("[Modal] Inference complete!")
-    return result
+        async with client.stream(
+            "POST",
+            f"{MODAL_STREAM_ENDPOINT}/stream",
+            json={"blob_name": blob_name},
+            headers={"x-plumonet-secret": PLUMONET_SHARED_SECRET},
+        ) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                msg = f"Modal returned {resp.status_code}: {body[:200]!r}"
+                yield f'data: {{"stage": "error", "message": {msg!r}}}\n\n'.encode()
+                return
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+    except httpx.HTTPError as e:
+        yield f'data: {{"stage": "error", "message": "Modal request failed: {e}"}}\n\n'.encode()
 
 
 # ─── Route Handlers ──────────────────────────────────────────────────────
@@ -278,28 +304,33 @@ async def finalize_upload(request) -> JSONResponse:
         return JSONResponse({"error": f"Upload finalization failed: {e}"}, status_code=500)
 
 
-async def predict(request) -> JSONResponse:
-    """POST /api/predict — call Modal inference for a committed blob."""
-    try:
-        body = await request.json()
-        blob_name = body.get("blob_name")
-        if not blob_name:
-            return JSONResponse({"error": "blob_name required"}, status_code=400)
+async def healthz(request) -> JSONResponse:
+    """GET /healthz — required by the Azure Container App's liveness/readiness
+    probes (configured to check this exact path on port 3000); without it the
+    probes 404 forever and the revision never goes Ready, no matter how many
+    times you deploy."""
+    return JSONResponse({"status": "ok"})
 
-        print(f"[Azure] Calling Modal inference for {blob_name}")
-        result = await call_modal_inference(blob_name)
-        print("[Azure] Inference successful!")
-        return JSONResponse(result)
-    except Exception as e:
-        print(f"[Azure ERROR] Prediction endpoint failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return JSONResponse({"error": f"Prediction failed: {e}"}, status_code=500)
+
+async def predict(request) -> StreamingResponse:
+    """POST /api/predict — stream Modal inference progress for a committed blob."""
+    body = await request.json()
+    blob_name = body.get("blob_name")
+    if not blob_name:
+        return JSONResponse({"error": "blob_name required"}, status_code=400)
+
+    print(f"[Azure] Proxying streaming inference for {blob_name}")
+    return StreamingResponse(
+        stream_modal_inference(blob_name),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ─── App Setup ────────────────────────────────────────────────────────────
 
 routes = [
+    Route("/healthz", healthz, methods=["GET"]),
     Route("/api/upload/initiate", initiate_upload, methods=["POST", "OPTIONS"]),
     Route("/api/upload/chunk", upload_chunk, methods=["POST", "OPTIONS"]),
     Route("/api/upload/finalize", finalize_upload, methods=["POST", "OPTIONS"]),
@@ -331,7 +362,7 @@ if __name__ == "__main__":
 ╚════════════════════════════════════════════════════════════╝
 
 Upload  : async SDK · cached client · ordered+verified commit ✅
-Inference: Modal.Function.from_name() + .remote.aio()          ✅
+Inference: httpx streaming proxy → Modal Pattern-5 SSE endpoint ✅
 
 Starting server on port {PORT}...
     """)
