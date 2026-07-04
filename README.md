@@ -12,6 +12,11 @@ from **Azure Blob Storage** rather than a local copy of the data.
 
 ---
 
+## Try Pulmonet APP
+**Web Application:**  
+https://pulmonet.agreeablebeach-ed9dda6b.francecentral.azurecontainerapps.io/ui/
+
+
 ## Pipeline
 
 ```
